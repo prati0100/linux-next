@@ -482,27 +482,32 @@ __must_check int __media_pipeline_start(struct media_pad *pad,
 		bitmap_fill(has_no_links, entity->num_pads);
 
 		list_for_each_entry(link, &entity->links, list) {
-			struct media_pad *other_pad =
+			struct media_pad *local_pad =
 				link->sink->entity == entity ?
 				link->sink : link->source;
 
+			/* Ignore pads to which there is no route. */
+			if (!media_entity_has_route(entity, pad->index,
+						    local_pad->index))
+				continue;
+
 			/* Mark that a pad is connected by a link. */
-			bitmap_clear(has_no_links, other_pad->index, 1);
+			bitmap_clear(has_no_links, local_pad->index, 1);
 
 			/*
 			 * Pads that either do not need to connect or
 			 * are connected through an enabled link are
 			 * fine.
 			 */
-			if (!(other_pad->flags & MEDIA_PAD_FL_MUST_CONNECT) ||
+			if (!(local_pad->flags & MEDIA_PAD_FL_MUST_CONNECT) ||
 			    link->flags & MEDIA_LNK_FL_ENABLED)
-				bitmap_set(active, other_pad->index, 1);
+				bitmap_set(active, local_pad->index, 1);
 
 			/*
 			 * Link validation will only take place for
 			 * sink ends of the link that are enabled.
 			 */
-			if (link->sink != other_pad ||
+			if (link->sink != local_pad ||
 			    !(link->flags & MEDIA_LNK_FL_ENABLED))
 				continue;
 
