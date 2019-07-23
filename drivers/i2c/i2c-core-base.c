@@ -918,6 +918,11 @@ i2c_new_client_device(struct i2c_adapter *adap, struct i2c_board_info const *inf
 		}
 	}
 
+	if (adap->attach_ops &&
+	    adap->attach_ops->attach_client &&
+	    adap->attach_ops->attach_client(adap, info, client) != 0)
+		goto err_attach_client;
+
 	status = device_register(&client->dev);
 	if (status)
 		goto out_free_props;
@@ -928,6 +933,9 @@ i2c_new_client_device(struct i2c_adapter *adap, struct i2c_board_info const *inf
 	return client;
 
 out_free_props:
+	if (adap->attach_ops && adap->attach_ops->detach_client)
+		adap->attach_ops->detach_client(adap, client);
+err_attach_client:
 	if (info->properties)
 		device_remove_properties(&client->dev);
 out_err_put_of_node:
@@ -949,8 +957,16 @@ EXPORT_SYMBOL_GPL(i2c_new_client_device);
  */
 void i2c_unregister_device(struct i2c_client *client)
 {
+	struct i2c_adapter *adap;
+
 	if (IS_ERR_OR_NULL(client))
 		return;
+
+	adap = client->adapter;
+
+	if (adap->attach_ops &&
+	    adap->attach_ops->detach_client)
+		adap->attach_ops->detach_client(adap, client);
 
 	if (client->dev.of_node) {
 		of_node_clear_flag(client->dev.of_node, OF_POPULATED);
