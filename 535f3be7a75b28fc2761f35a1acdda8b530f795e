@@ -1,0 +1,6 @@
+Zack himself is not 100% sure what the TX window depends on, but he says
+it is largely depends on the flash. How it varies across J7 SoCs has not
+been characterized.
+
+Based on this information, I am keeping this value here and not in a SoC
+specific location.
