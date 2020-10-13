@@ -1,0 +1,4 @@
+Changes in v2:
+
+- Move CQSPI_PHY_RX_LOOKUP_{LOW,HIGH}_BOUND to the previous patch to
+  make sure it builds.
