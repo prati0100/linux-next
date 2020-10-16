@@ -1,3 +1,7 @@
+Changes in v3:
+
+- Add blank lines after the two while loops.
+
 Changes in v2:
 
 - Define CQSPI_PHY_RX_LOOKUP_{LOW,HIGH}_BOUND in this patch instead of
