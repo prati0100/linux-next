@@ -25,6 +25,9 @@
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-ctrls.h>
 #include <linux/regmap.h>
+#include <media/v4l2-event.h>
+
+#define EMBED_HACK_MODE 3
 
 #define DS90_FPD_RX_NPORTS	4  /* Physical FPD-link RX ports */
 #define DS90_CSI_TX_NPORTS	2  /* Physical CSI-2 TX ports */
@@ -38,6 +41,16 @@
 
 /* XXX: always use CSI port 0 */
 #define HACK_CSI_PORT		0
+
+static inline bool ds90_pad_is_sink(u32 pad)
+{
+	return pad < 4;
+}
+
+static inline bool ds90_pad_is_source(u32 pad)
+{
+	return pad == 4 || pad == 5;
+}
 
 /*
  * Register map
@@ -138,7 +151,7 @@
 #define DS90_RR_BCC_STATUS		0x47
 
 #define DS90_RR_FPD3_CAP		0x4A
-#define DS90_RR_RAW_EMBED_DTYPE	0x4B
+#define DS90_RR_RAW_EMBED_DTYPE		0x4B
 
 #define DS90_SR_FPD3_PORT_SEL		0x4C
 
@@ -304,6 +317,9 @@ struct ds90_rxport {
 	struct fwnode_handle *fwnode;
 
 	enum ds90_rxport_mode mode;
+
+	u8 embed_mode;		// EMBED_DTYPE_EN (0 = off, 1-3 - num first long packets to embed)
+	u8 embed_datatype;	// EMBED_DTYPE_ID DT for embedded data (e.g. 0x12)
 };
 
 struct ds90_asd {
@@ -335,7 +351,6 @@ struct ds90_data {
 
 	struct v4l2_subdev          sd;
 	struct media_pad            pads[DS90_NPORTS];
-	struct v4l2_mbus_framefmt   fmt[DS90_NPORTS];
 	struct v4l2_ctrl_handler    ctrl_handler;
 	struct v4l2_async_notifier notifier;
 
@@ -352,6 +367,8 @@ struct ds90_data {
 
 	u8 current_read_csiport;
 	u8 current_write_csiport_mask;
+
+	struct v4l2_subdev_krouting routing;
 };
 
 static inline struct ds90_data *sd_to_ds90(struct v4l2_subdev *sd)
@@ -552,6 +569,25 @@ static int ds90_csiport_write(struct ds90_data *priv, int nport, u8 reg, u8 val)
 	return ret;
 }
 
+#if 0
+static int ds90_csiport_update_bits(struct ds90_data *priv, int nport,
+				   u8 reg, u8 mask, u8 val)
+{
+	struct device *dev = &priv->client->dev;
+	int ret;
+
+	ds90_csiport_select(priv, nport);
+
+	ret = regmap_update_bits(priv->regmap, reg, mask, val);
+
+	if (ret)
+		dev_err(dev, "%s: cannot update register 0x%02x (%d)!\n",
+			__func__, reg, ret);
+
+	return ret;
+}
+#endif
+
 static int ds90_write_ind8(const struct ds90_data *priv, u8 reg, u8 val)
 {
 	int err;
@@ -652,7 +688,7 @@ static int ds90_atr_attach_client(struct i2c_atr *atr, u32 chan_id,
 
 	*alias_id = alias; /* tell the atr which alias we chose */
 
-	dev_info(dev, "rx%d: client 0x%02x mapped at alias 0x%02x (%s)\n",
+	dev_dbg(dev, "rx%d: client 0x%02x mapped at alias 0x%02x (%s)\n",
 		 rxport->nport, client->addr, alias, client->name);
 
 out:
@@ -710,7 +746,7 @@ static void ds90_atr_detach_client(struct i2c_atr *atr, u32 chan_id,
 	ds90_rxport_write(priv, chan_id, DS90_RR_SLAVE_ALIAS(reg_idx), 0);
 	priv->atr_slave_id[pool_idx] = 0;
 
-	dev_info(dev, "rx%d: client 0x%02x unmapped from alias 0x%02x (%s)\n",
+	dev_dbg(dev, "rx%d: client 0x%02x unmapped from alias 0x%02x (%s)\n",
 		 rxport->nport, client->addr, alias, client->name);
 
 out:
@@ -998,7 +1034,7 @@ static int ds90_rxport_add_serializer(struct ds90_data *priv, int nport)
 		return -EIO;
 	}
 
-	dev_info(dev, "rx%d: remote serializer at alias 0x%02x\n",
+	dev_dbg(dev, "rx%d: remote serializer at alias 0x%02x\n",
 		 nport, rxport->ser_client->addr);
 
 	return err;
@@ -1065,6 +1101,11 @@ static int ds90_rxport_probe_one(struct ds90_data *priv,
 	rxport->priv = priv;
 	rxport->mode = RXPORT_MODE_RAW10;
 
+#ifdef EMBED_HACK_MODE
+	rxport->embed_mode = EMBED_HACK_MODE;
+	rxport->embed_datatype = 0x12; // Embedded 8-bit non Image Data
+#endif
+
 	ret = ds90_of_get_reg(priv->client->dev.of_node, ser_names[nport]);
 	if (ret < 0)
 		goto err_free_rxport;
@@ -1102,7 +1143,7 @@ static int ds90_rxport_probe_one(struct ds90_data *priv,
 	ds90_write(priv, DS90_SR_I2C_RX_ID(nport),
 			  rxport->reg_client->addr << 1);
 
-	dev_info(dev, "rx%d: at alias 0x%02x\n",
+	dev_dbg(dev, "rx%d: at alias 0x%02x\n",
 		 nport, rxport->reg_client->addr);
 
 
@@ -1121,6 +1162,10 @@ static int ds90_rxport_probe_one(struct ds90_data *priv,
 
 		// datatype 0x1e = YUV422 8-bit, VC=nport
 		ds90_rxport_write(priv, nport, DS90_RR_RAW10_ID, 0x1e | (nport << 6));
+
+		ds90_rxport_write(priv, nport, DS90_RR_RAW_EMBED_DTYPE,
+		                  (rxport->embed_mode << 6) |
+		                  rxport->embed_datatype);
 
 		break;
 
@@ -1176,7 +1221,7 @@ static int ds90_rxport_probe_one(struct ds90_data *priv,
 	ds90_rxport_write(priv, nport,
 			  DS90_RR_SER_ALIAS_ID, rxport->ser_alias << 1);
 
-	dev_info(dev, "ser%d: at alias 0x%02x\n",
+	dev_dbg(dev, "ser%d: at alias 0x%02x\n",
 		 nport, rxport->ser_alias);
 
 	// XXX not sure if we need to delay before accessing the Ser
@@ -1270,7 +1315,7 @@ static void ds90_rxport_handle_events(struct ds90_data *priv, int nport)
 	if (err)
 		return;
 
-	printk("Handle RX%d events: STS: %x, %x, %x, BCC %x\n", nport,
+	dev_dbg(dev, "Handle RX%d events: STS: %x, %x, %x, BCC %x\n", nport,
 	       rx_port_sts1, rx_port_sts2, csi_rx_sts, bcc_sts);
 
 	if (bcc_sts)
@@ -1295,7 +1340,7 @@ static void ds90_rxport_handle_events(struct ds90_data *priv, int nport)
 
 		rxport->reported_width = (h << 8) | l;
 
-		printk("RX%d: PIXELS %u\n", nport, (h << 8) | l);
+		dev_dbg(dev, "RX%d: PIXELS %u\n", nport, (h << 8) | l);
 	}
 
 	if (rx_port_sts2 & DS90_RR_RX_PORT_STS2_FPD3_ENCODE_ERROR)
@@ -1313,7 +1358,7 @@ static void ds90_rxport_handle_events(struct ds90_data *priv, int nport)
 		err = ds90_rxport_read(priv, nport, DS90_RR_LINE_COUNT_LO, &l);
 
 		rxport->reported_height = (h << 8) | l;
-		printk("RX%d: LINES %u\n", nport, (h << 8) | l);
+		dev_dbg(dev, "RX%d: LINES %u\n", nport, (h << 8) | l);
 	}
 
 	if (csi_rx_sts & DS90_RR_CSI_RX_STS_LENGTH_ERR)
@@ -1331,13 +1376,13 @@ static void ds90_rxport_handle_events(struct ds90_data *priv, int nport)
 	/* Update locked status */
 	locked = rx_port_sts1 & DS90_RR_RX_PORT_STS1_LOCK_STS;
 	if (locked && !rxport->locked) {
-		dev_info(dev, "rx%d: LOCKED\n", nport);
+		dev_dbg(dev, "rx%d: LOCKED\n", nport);
 		/* See note about locking in ds90_rxport_add_serializer()! */
 		ds90_rxport_add_serializer(priv, nport);
 		sysfs_notify(&dev->kobj,
 			     ds90_rxport_attr_group[nport].name, "locked");
 	} else if (!locked && rxport->locked) {
-		dev_info(dev, "rx%d: NOT LOCKED\n", nport);
+		dev_dbg(dev, "rx%d: NOT LOCKED\n", nport);
 		ds90_rxport_remove_serializer(priv, nport);
 		sysfs_notify(&dev->kobj,
 			     ds90_rxport_attr_group[nport].name, "locked");
@@ -1370,8 +1415,11 @@ static void ds90_set_tpg(struct ds90_data *priv, int tpg_num)
 		u8 vfp = 10;
 		u16 blank_lines = vbp + vfp + 2; /* total blanking lines */
 
-		u16 width  = priv->fmt[DS90_NPORTS - 1].width;
-		u16 height = priv->fmt[DS90_NPORTS - 1].height;
+		//u16 width  = priv->fmt[DS90_NPORTS - 1].width;
+		//u16 height = priv->fmt[DS90_NPORTS - 1].height;
+		u16 width = 1280;
+		u16 height = 720;
+
 		u16 bytespp = 2; /* For MEDIA_BUS_FMT_UYVY8_1X16 */
 		u8 cbars_idx = tpg_num - TEST_PATTERN_V_COLOR_BARS_1;
 		u8 num_cbars = 1 << cbars_idx;
@@ -1467,10 +1515,10 @@ static int ds90_s_stream(struct v4l2_subdev *sd, int enable)
 		if (speed_select == 0)
 			csi_ctl |= DS90_TR_CSI_CTL_CSI_CAL_EN;
 
+		csi_ctl |= (4 - priv->csitxport.num_data_lanes) << 4;
+
 		ds90_write(priv, DS90_SR_CSI_PLL_CTL, speed_select);
 		ds90_csiport_write(priv, HACK_CSI_PORT, DS90_TR_CSI_CTL, csi_ctl);
-
-		//ds90_set_tpg(priv, TEST_PATTERN_V_COLOR_BARS_8);
 	} else {
 		ds90_csiport_write(priv, HACK_CSI_PORT, DS90_TR_CSI_CTL, 0);
 
@@ -1488,49 +1536,6 @@ static int ds90_s_stream(struct v4l2_subdev *sd, int enable)
 	return 0;
 }
 
-static struct v4l2_mbus_framefmt *
-ds90_get_pad_format(struct ds90_data *priv,
-		    struct v4l2_subdev_pad_config *cfg,
-		    unsigned int pad, u32 which)
-{
-	switch (which) {
-	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(&priv->sd, cfg, pad);
-	case V4L2_SUBDEV_FORMAT_ACTIVE:
-		return &priv->fmt[pad];
-	default:
-		return NULL;
-	}
-}
-
-static int ds90_get_fmt(struct v4l2_subdev *sd,
-			struct v4l2_subdev_pad_config *cfg,
-			struct v4l2_subdev_format *format)
-{
-	struct ds90_data *priv = sd_to_ds90(sd);
-	struct v4l2_mbus_framefmt *cfg_fmt;
-
-	if (format->pad >= DS90_NPORTS)
-		return -EINVAL;
-
-	cfg_fmt = ds90_get_pad_format(priv, cfg, format->pad, format->which);
-	if (!cfg_fmt)
-		return -EINVAL;
-
-	format->format = *cfg_fmt;
-
-	return 0;
-}
-
-static void ds90_init_format(struct v4l2_mbus_framefmt *fmt)
-{
-	fmt->width		= 1280;
-	fmt->height		= 800;
-	fmt->code		= MEDIA_BUS_FMT_YUYV8_2X8;
-	fmt->colorspace		= V4L2_COLORSPACE_SMPTE170M;
-	fmt->field		= V4L2_FIELD_NONE;
-}
-
 static const struct v4l2_ctrl_ops ds90_ctrl_ops = {
 	.s_ctrl		= ds90_s_ctrl,
 };
@@ -1539,54 +1544,168 @@ static const struct v4l2_subdev_video_ops ds90_video_ops = {
 	.s_stream	= ds90_s_stream,
 };
 
-static int ds90_enum_mbus_code(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
-				 struct v4l2_subdev_mbus_code_enum *code)
+struct ds90_format_info {
+	u32 code;
+	u32 bpp;
+	u8 datatype;
+};
+
+static const struct ds90_format_info ds90_formats[] = {
+	{ .code = MEDIA_BUS_FMT_YUYV8_1X16, .bpp = 16, .datatype = 0x1e, },
+	{ .code = MEDIA_BUS_FMT_UYVY8_1X16, .bpp = 16, .datatype = 0x1e, },
+	{ .code = MEDIA_BUS_FMT_VYUY8_1X16, .bpp = 16, .datatype = 0x1e, },
+	{ .code = MEDIA_BUS_FMT_YVYU8_1X16, .bpp = 16, .datatype = 0x1e, },
+
+	{ .code = MEDIA_BUS_FMT_METADATA_8, .bpp = 8, .datatype = 0x12, },
+	{ .code = MEDIA_BUS_FMT_METADATA_16, .bpp = 16, .datatype = 0x12, },
+
+	/* Legacy */
+	{ .code = MEDIA_BUS_FMT_YUYV8_2X8, .bpp = 16, .datatype = 0x1e, },
+	{ .code = MEDIA_BUS_FMT_UYVY8_2X8, .bpp = 16, .datatype = 0x1e, },
+	{ .code = MEDIA_BUS_FMT_VYUY8_2X8, .bpp = 16, .datatype = 0x1e, },
+	{ .code = MEDIA_BUS_FMT_YVYU8_2X8, .bpp = 16, .datatype = 0x1e, },
+};
+
+static const struct ds90_format_info *ds90_find_format(u32 code)
 {
-	if (code->pad >= DS90_NPORTS)
-		return -EINVAL;
+	unsigned int i;
 
-	if (code->index >= 1) //ARRAY_SIZE(ov5640_formats))
-		return -EINVAL;
-
-	//code->code = ov5640_formats[code->index].code;
-
-	code->code = MEDIA_BUS_FMT_YUYV8_2X8;
-	return 0;
-}
-
-
-static int ds90_set_fmt(struct v4l2_subdev *sd,
-			  struct v4l2_subdev_pad_config *cfg,
-			  struct v4l2_subdev_format *format)
-{
-	struct ds90_data *priv = sd_to_ds90(sd);
-	struct v4l2_mbus_framefmt *cfg_fmt;
-
-	if (format->pad >= DS90_NPORTS)
-		return -EINVAL;
-
-	cfg_fmt = ds90_get_pad_format(priv, cfg, format->pad, format->which);
-	if (!cfg_fmt) {
-		printk("bad get pdf\n");
-		return -EINVAL;
+	for (i = 0; i < ARRAY_SIZE(ds90_formats); ++i) {
+		if (ds90_formats[i].code == code)
+			return &ds90_formats[i];
 	}
 
-	*cfg_fmt = format->format;
+	return NULL;
+}
+
+static int ds90_get_routing(struct v4l2_subdev *sd,
+		   struct v4l2_subdev_krouting *routing)
+{
+	struct ds90_data *priv = sd_to_ds90(sd);
+	struct v4l2_subdev_krouting *src;
+
+	dev_dbg(&priv->client->dev, "ds90_get_routing\n");
+
+	src = &priv->routing;
+
+	if (routing->num_routes < src->num_routes) {
+		routing->num_routes = src->num_routes;
+		return -ENOSPC;
+	}
+
+	v4l2_subdev_cpy_routing(routing, src);
 
 	return 0;
 }
 
+static int ds90_set_routing(struct v4l2_subdev *sd,
+		   struct v4l2_subdev_krouting *routing)
+{
+	struct ds90_data *priv = sd_to_ds90(sd);
+	struct v4l2_subdev_krouting *dst;
+	int ret;
+
+	// XXX we can only support up to V4L2_FRAME_DESC_ENTRY_MAX, until frame desc is made
+	// dynamically allocated
+	if (routing->num_routes >= V4L2_FRAME_DESC_ENTRY_MAX)
+		return -EINVAL;
+
+	dst = &priv->routing;
+
+	ret = v4l2_subdev_dup_routing(dst, routing);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int ds90_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
+			      struct v4l2_mbus_frame_desc *fd)
+{
+	struct ds90_data *priv = sd_to_ds90(sd);
+	int i;
+	int ret;
+
+	dev_dbg(&priv->client->dev, "ds90_get_frame_desc for pad %d\n", pad);
+
+	if (pad != 4) // XXX first csi port
+		return -EINVAL;
+
+	memset(fd, 0, sizeof(*fd));
+
+	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
+
+	for (i = 0; i < priv->routing.num_routes; ++i) {
+		const struct v4l2_subdev_route *route = &priv->routing.routes[i];
+		struct v4l2_subdev_format fmt;
+		const struct ds90_format_info *ds90_fmt;
+
+		if (!(route->flags & V4L2_SUBDEV_ROUTE_FL_ACTIVE))
+			continue;
+
+		ret = v4l2_subdev_get_format_dir(&priv->pads[route->sink_pad],
+		                                 route->sink_stream,
+						 V4L2_DIR_SOURCEWARD,
+						 &fmt);
+
+		if (ret) {
+			dev_err(&priv->client->dev, "Unable to find format\n");
+			return ret;
+		}
+
+		ds90_fmt = ds90_find_format(fmt.format.code);
+		if (!ds90_fmt) {
+			dev_err(&priv->client->dev, "Unable to find ds90 format\n");
+			return -EINVAL;
+		}
+
+		fd->entry[fd->num_entries].stream = route->source_stream;
+
+		fd->entry[fd->num_entries].flags = V4L2_MBUS_FRAME_DESC_FL_LEN_MAX;
+		fd->entry[fd->num_entries].length = fmt.format.width * fmt.format.height * ds90_fmt->bpp / 8;
+		fd->entry[fd->num_entries].pixelcode = fmt.format.code;
+
+		fd->entry[fd->num_entries].bus.csi2.vc = route->sink_pad;
+		fd->entry[fd->num_entries].bus.csi2.dt = ds90_fmt->datatype;
+		fd->num_entries++;
+
+		dev_dbg(&priv->client->dev, "UB FD source %u/%u: %ux%u\n", route->sink_pad, route->sink_stream,
+		       fmt.format.width, fmt.format.height);
+	}
+
+	return 0;
+}
 
 static const struct v4l2_subdev_pad_ops ds90_pad_ops = {
-	.enum_mbus_code = ds90_enum_mbus_code,
-	.get_fmt	= ds90_get_fmt,
-	.set_fmt	= ds90_set_fmt,
+	.get_routing	= ds90_get_routing,
+	.set_routing	= ds90_set_routing,
+	.get_frame_desc	= ds90_get_frame_desc,
+};
+
+static const struct v4l2_subdev_core_ops ds90_subdev_core_ops = {
+	.log_status		= v4l2_ctrl_subdev_log_status,
+	.subscribe_event	= v4l2_ctrl_subdev_subscribe_event,
+	.unsubscribe_event	= v4l2_event_subdev_unsubscribe,
 };
 
 static const struct v4l2_subdev_ops ds90_subdev_ops = {
+	.core		= &ds90_subdev_core_ops,
 	.video		= &ds90_video_ops,
 	.pad		= &ds90_pad_ops,
+};
+
+static bool ds90_has_route(struct media_entity *entity, unsigned int pad0,
+			  unsigned int pad1)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
+	struct ds90_data *priv = sd_to_ds90(sd);
+
+	return v4l2_subdev_has_route(&priv->routing, pad0, pad1);
+}
+
+static const struct media_entity_operations ds90_entity_ops = {
+	.link_validate = v4l2_subdev_link_validate,
+	.has_route = ds90_has_route
 };
 
 /* -----------------------------------------------------------------------------
@@ -1607,11 +1726,11 @@ static irqreturn_t ds90_handle_events(int irq, void *arg)
 	if (!err && int_sts) {
 		u8 fwd_sts;
 
-		printk("INTERRUPT_STS %x\n", int_sts);
+		dev_dbg(&priv->client->dev, "INTERRUPT_STS %x\n", int_sts);
 
 		ds90_read(priv, DS90_SR_FWD_STS, &fwd_sts);
 
-		printk("FWD_STS %#x\n", fwd_sts);
+		dev_dbg(&priv->client->dev, "FWD_STS %#x\n", fwd_sts);
 
 		if (int_sts & DS90_SR_INTERRUPT_STS_IS_CSI_TX0)
 			ds90_csi_handle_events(priv);
@@ -1659,7 +1778,6 @@ static int ds90_parse_dt(struct ds90_data *priv)
 {
 	struct device_node *np = priv->client->dev.of_node;
 	struct device *dev = &priv->client->dev;
-	struct device_node *ep_np = NULL;
 	int err = 0;
 	int n;
 
@@ -1679,6 +1797,25 @@ static int ds90_parse_dt(struct ds90_data *priv)
 
 	dev_dbg(dev, "i2c-alias-pool has %zu aliases", priv->atr_alias_num);
 
+	for (n = 0; n < DS90_NPORTS; ++n) {
+		struct device_node *ep_np;
+
+		ep_np = of_graph_get_endpoint_by_regs(np, n, 0);
+		if (!ep_np)
+			continue;
+
+		if (n < DS90_FPD_RX_NPORTS)
+			err = ds90_rxport_probe_one(priv, ep_np, n);
+		else
+			err = ds90_csiport_probe_one(priv, ep_np);
+
+		of_node_put(ep_np);
+
+		if (err)
+			break;
+	}
+
+#if 0
 	for_each_endpoint_of_node(np, ep_np) {
 		struct of_endpoint ep;
 
@@ -1701,6 +1838,7 @@ static int ds90_parse_dt(struct ds90_data *priv)
 			break;
 		}
 	}
+#endif
 
 	if (err)
 		ds90_remove_ports(priv);
@@ -1862,9 +2000,6 @@ static int ds90_create_subdev(struct ds90_data *priv)
 	int ret;
 	int i;
 
-	for (i = 0; i < DS90_NPORTS; i++)
-		ds90_init_format(&priv->fmt[i]);
-
 	v4l2_i2c_subdev_init(&priv->sd, priv->client, &ds90_subdev_ops);
 	v4l2_ctrl_handler_init(&priv->ctrl_handler,
 			       ARRAY_SIZE(ds90_tpg_qmenu) - 1);
@@ -1884,12 +2019,15 @@ static int ds90_create_subdev(struct ds90_data *priv)
 		goto err_free_ctrl;
 	}
 
-	priv->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	priv->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
 	priv->sd.entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
+	priv->sd.entity.ops = &ds90_entity_ops;
 
-	for (i = 0; i < DS90_NPORTS; i++)
+	for (i = 0; i < DS90_NPORTS; i++) {
 		priv->pads[i].flags = (i < DS90_FPD_RX_NPORTS) ?
 			MEDIA_PAD_FL_SINK : MEDIA_PAD_FL_SOURCE;
+		priv->pads[i].flags |= MEDIA_PAD_FL_MULTIPLEXED;
+	}
 
 	ret = media_entity_pads_init(&priv->sd.entity, DS90_NPORTS, priv->pads);
 	if (ret)
@@ -1923,6 +2061,7 @@ static void ds90_destroy_subdev(struct ds90_data *priv)
 {
 	ds90_v4l2_notifier_unregister(priv);
 	v4l2_async_unregister_subdev(&priv->sd);
+	v4l2_subdev_free_routing(&priv->routing);
 	media_entity_cleanup(&priv->sd.entity);
 	v4l2_ctrl_handler_free(&priv->ctrl_handler);
 }
@@ -2030,7 +2169,7 @@ static int ds90_probe(struct i2c_client *client)
 		// If we already have a LOCK, we don't seem to get an irq (at least when polling)
 		int i;
 
-		printk("INITIAL CHECK\n");
+		dev_dbg(dev, "INITIAL CHECK\n");
 
 		for (i = 0; i < DS90_FPD_RX_NPORTS; i++) {
 			u8 rx_port_sts1;
@@ -2040,7 +2179,7 @@ static int ds90_probe(struct i2c_client *client)
 
 			err = ds90_rxport_read(priv, i, DS90_RR_RX_PORT_STS1, &rx_port_sts1);
 			if (rx_port_sts1 & DS90_RR_RX_PORT_STS1_LOCK_STS) {
-				dev_info(dev, "rx%d: INITIAL LOCKED\n", i);
+				dev_dbg(dev, "rx%d: INITIAL LOCKED\n", i);
 				ds90_rxport_add_serializer(priv, i);
 				priv->rxport[i]->locked = true;
 			}
@@ -2048,7 +2187,7 @@ static int ds90_probe(struct i2c_client *client)
 	}
 
 	if (client->irq) {
-		dev_info(dev, "using IRQ %d\n", client->irq);
+		dev_dbg(dev, "using IRQ %d\n", client->irq);
 
 		err = devm_request_threaded_irq(dev, client->irq,
 						NULL, ds90_handle_events,
@@ -2076,7 +2215,7 @@ static int ds90_probe(struct i2c_client *client)
 			dev_err(dev, "Cannot create kthread (%d)\n", err);
 			goto err_kthread;
 		}
-		dev_info(dev, "using polling mode\n");
+		dev_dbg(dev, "using polling mode\n");
 	}
 
 	dev_info(dev, "Successfully probed (rev/mask %02x)\n", rev_mask);
@@ -2102,7 +2241,7 @@ static int ds90_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct ds90_data *priv = sd_to_ds90(sd);
 
-	dev_info(&client->dev, "Removing\n");
+	dev_dbg(&client->dev, "Removing\n");
 
 	if (priv->kthread)
 		kthread_stop(priv->kthread);
@@ -2112,7 +2251,7 @@ static int ds90_remove(struct i2c_client *client)
 	ds90_reset(priv, true);
 	mutex_destroy(&priv->alias_table_lock);
 
-	dev_info(&client->dev, "Remove done\n");
+	dev_dbg(&client->dev, "Remove done\n");
 
 	return 0;
 }
