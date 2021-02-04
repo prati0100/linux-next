@@ -726,6 +726,17 @@ config VIDEO_DS90UB913
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ds90ub913.
+
+config VIDEO_DS90UB960
+	tristate "TI DS90UB960-Q1 deserializer"
+	depends on OF_GPIO
+	select I2C_ATR
+	help
+	  Device driver for the Texas Instruments "DS90UB960-Q1
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ds90ub960.
+
 endmenu
 
 #
