@@ -792,8 +792,10 @@ static int ov1063x_configure(struct ov1063x_priv *priv)
 	ret = ov1063x_pll_setup(priv->clk_rate, &hts, vts,
 				priv->fps_numerator, priv->fps_denominator,
 				&pll_cfg);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(priv->dev, "pll setup failed: %d\n", ret);
 		return -EINVAL;
+	}
 
 	vts = pll_cfg.clk_out
 	    / (hts * 2 * priv->fps_numerator / priv->fps_denominator);
@@ -1515,6 +1517,8 @@ static int ov1063x_probe(struct i2c_client *client)
 	struct v4l2_subdev *sd;
 	int ret;
 
+	dev_dbg(&client->dev, "ov1063x_probe\n");
+
 	priv = devm_kzalloc(&client->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
@@ -1555,12 +1559,16 @@ static int ov1063x_probe(struct i2c_client *client)
 	 * disabled in the kernel. To that end, power it on manually here.
 	 */
 	ret = ov1063x_power_on(priv);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(priv->dev, "power on failed: %d\n", ret);
 		return ret;
+	}
 
 	ret = ov1063x_detect(priv);
-	if (ret)
+	if (ret) {
+		dev_err(priv->dev, "detect failed: %d\n", ret);
 		goto err_power;
+	}
 
 	/* Initialize the subdev and its controls. */
 	sd = &priv->subdev;
@@ -1638,7 +1646,7 @@ static int ov1063x_probe(struct i2c_client *client)
 	if (ret < 0)
 		goto err_pm;
 
-	dev_info(priv->dev, "%s probed\n", priv->name);
+	dev_dbg(priv->dev, "%s probed\n", priv->name);
 
 	return 0;
 
