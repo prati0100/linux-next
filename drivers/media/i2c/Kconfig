@@ -713,6 +713,22 @@ config VIDEO_ST_MIPID02
 endmenu
 
 #
+# XXX What is the correct place for these?
+#
+
+menu "Video serializers and deserializers"
+
+config VIDEO_DS90UB913
+	tristate "TI DS90UB913-Q1 serializer"
+	help
+	  Device driver for the Texas Instruments DS90UB913-Q1
+	  FPD-Link III Serializer.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ds90ub913.
+endmenu
+
+#
 # V4L2 I2C drivers that are related with Camera support
 #
 
