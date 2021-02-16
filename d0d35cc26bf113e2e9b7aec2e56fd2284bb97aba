@@ -1,0 +1,4 @@
+Changes in v2:
+
+- Use Rx submode for DPHY.
+- Use BIT() for defining bits in DPHY lane control register.
