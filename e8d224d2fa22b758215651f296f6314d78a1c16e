@@ -6,3 +6,6 @@ Changes in v2:
 - Print error message if DMA fails when starting stream.
 - Call of_platform_populate() to probe cdns-csi2rx.
 - Remove comma from MODULE_AUTHOR().
+- Move Cadence CSI2RX and DPHY and V4L2_SUBDEV_API to "depends on"
+  instead of "select" to avoid dependency problems.
+- Add dependency on MEDIA_SUPPORT.
