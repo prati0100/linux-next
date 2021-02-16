@@ -1,0 +1,3 @@
+Changes in v2:
+
+- Use usleep_range() instead of udelay().
