@@ -2,3 +2,5 @@ Changes in v2:
 
 - Instead of having a different binding for Rx, convert the original
   binding to YAML and update it.
+
+- Make the clocks optional because they are not needed for Rx.
