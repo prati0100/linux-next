@@ -1,0 +1,7 @@
+Changes in v2:
+
+- Move from a different driver into the main DPHY driver.
+
+- Add defines for power island magic values.
+
+- Update copyright year.
