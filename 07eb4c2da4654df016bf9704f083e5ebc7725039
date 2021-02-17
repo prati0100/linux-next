@@ -1,3 +1,7 @@
+Changes in v3:
+
+- Rename dphy@4580000 to phy@4580000.
+
 Changes in v2:
 
 - Make cdns_csi2rx a child of ti_csi2rx.
