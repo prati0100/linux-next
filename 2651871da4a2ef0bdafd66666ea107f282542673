@@ -1,0 +1,12 @@
+Changes in v3:
+
+- Rename dphy@4580000 to phy@4580000.
+
+Changes in v2:
+
+- Make cdns_csi2rx a child of ti_csi2rx.
+- Move power-domain from cdns to ti.
+- Add #address-cells and #size-cells to ti_csi2rx
+- Update the address after the "@" for cdns_csi2rx.
+- Add address after "@" to ti_csi2rx.
+- Remove cdns_csi2rx phandle.
