@@ -1,3 +1,9 @@
+Changes in v3:
+
+- Power off the PHY if configuration failed.
+- Do not call devm_phy_put() on module remove. Devres framework will
+  take care of that.
+
 Changes in v2:
 
 - Use Rx submode for DPHY.
