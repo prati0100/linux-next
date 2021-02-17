@@ -1,3 +1,7 @@
+Changes in v3:
+
+- Remove the explicit "ret = 0"
+
 Changes in v2:
 
 - Use DMA device for allocating buffer.
