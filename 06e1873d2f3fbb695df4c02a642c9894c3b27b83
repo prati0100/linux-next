@@ -1,0 +1,11 @@
+No changes in v3.
+
+Changes in v2:
+
+- Add description for reg.
+- Remove phandle to csi2rx. It is now a subnode.
+- Add property power-domains.
+- Add property ranges.
+- Add property csi-bridge@.
+- Make #address-cells and #size-cells mandatory.
+- Update example.
