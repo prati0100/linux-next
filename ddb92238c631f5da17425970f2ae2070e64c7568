@@ -1,0 +1,5 @@
+Changes in v2:
+
+- Use DMA device for allocating buffer.
+- Free buffer before returning.
+- Check dmaengine return for errors.
