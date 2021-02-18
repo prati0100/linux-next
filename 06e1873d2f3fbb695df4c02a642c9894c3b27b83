@@ -1,3 +1,7 @@
+Changes in v4:
+
+- Remove DMA channels 1-31. We can add them later as needed.
+
 No changes in v3.
 
 Changes in v2:
