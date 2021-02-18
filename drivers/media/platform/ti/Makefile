@@ -5,3 +5,4 @@ obj-y += vpe/
 obj-y += davinci/
 obj-y += omap/
 obj-y += omap3isp/
+obj-y += j721e-csi2rx/
