@@ -1403,6 +1403,8 @@ static void v4l_fill_fmtdesc(struct v4l2_fmtdesc *fmt)
 	case V4L2_META_FMT_UVC:		descr = "UVC Payload Header Metadata"; break;
 	case V4L2_META_FMT_D4XX:	descr = "Intel D4xx UVC Metadata"; break;
 	case V4L2_META_FMT_VIVID:       descr = "Vivid Metadata"; break;
+	case V4L2_META_FMT_8:		descr = "Generic 8-bit Metadata"; break;
+	case V4L2_META_FMT_16:		descr = "Generic 16-bit Metadata"; break;
 
 	default:
 		/* Compressed formats */
