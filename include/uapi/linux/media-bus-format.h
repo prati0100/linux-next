@@ -156,4 +156,8 @@
 /* HSV - next is	0x6002 */
 #define MEDIA_BUS_FMT_AHSV8888_1X32		0x6001
 
+/* Generic metadata */
+#define MEDIA_BUS_FMT_METADATA_8        0x7002
+#define MEDIA_BUS_FMT_METADATA_16       0x7003
+
 #endif /* __LINUX_MEDIA_BUS_FORMAT_H */
