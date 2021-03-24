@@ -9,6 +9,8 @@
  * Copyright (C) 2020 Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  */
 
+#define META_HACK 3
+
 #include <linux/clk.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -26,6 +28,7 @@
 #include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-subdev.h>
+#include <media/v4l2-device.h>
 
 /* Register definitions */
 #define OV1063X_REG_8BIT(n)			((1 << 16) | (n))
@@ -453,8 +456,11 @@ struct ov1063x_priv {
 	const char			*name;
 	unsigned long			clk_rate;
 
-	struct v4l2_subdev		subdev;
-	struct media_pad		pad;
+	struct v4l2_subdev		mux_subdev;
+	struct media_pad		mux_pads[3];
+
+	struct v4l2_subdev		sensor_subdev;
+	struct media_pad		sensor_pads[2];
 
 	struct v4l2_ctrl_handler	hdl;
 
@@ -469,6 +475,8 @@ struct ov1063x_priv {
 
 	unsigned int			fps_numerator;
 	unsigned int			fps_denominator;
+
+	struct v4l2_async_notifier notifier;
 };
 
 /*
@@ -510,10 +518,16 @@ static const u32 ov1063x_mbus_formats[] = {
 	MEDIA_BUS_FMT_YVYU8_2X8,
 };
 
-static inline struct ov1063x_priv *to_ov1063x(struct v4l2_subdev *sd)
+static inline struct ov1063x_priv *to_ov1063x_mux(struct v4l2_subdev *sd)
 {
-	return container_of(sd, struct ov1063x_priv, subdev);
+	return container_of(sd, struct ov1063x_priv, mux_subdev);
 }
+
+static inline struct ov1063x_priv *to_ov1063x_sensor(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct ov1063x_priv, sensor_subdev);
+}
+
 
 /* -----------------------------------------------------------------------------
  * Read/Write Helpers
@@ -1085,8 +1099,10 @@ static const struct v4l2_ctrl_ops ov1063x_ctrl_ops = {
 
 static int ov1063x_s_stream(struct v4l2_subdev *sd, int enable)
 {
-	struct ov1063x_priv *priv = to_ov1063x(sd);
+	struct ov1063x_priv *priv = to_ov1063x_mux(sd);
 	int ret = 0;
+
+	dev_dbg(priv->dev, "ov1063x_s_stream %d\n", enable);
 
 	if (!enable) {
 		ov1063x_write(priv, OV1063X_STREAM_MODE, 0, &ret);
@@ -1148,7 +1164,8 @@ __ov1063x_get_pad_format(struct ov1063x_priv *priv,
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(&priv->subdev, cfg, pad);
+		// XXX uses pix_subdev
+		return v4l2_subdev_get_try_format(&priv->sensor_subdev, cfg, pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &priv->format;
 	default:
@@ -1156,11 +1173,203 @@ __ov1063x_get_pad_format(struct ov1063x_priv *priv,
 	}
 }
 
-static int ov1063x_init_cfg(struct v4l2_subdev *sd,
+
+static const struct v4l2_subdev_core_ops ov1063x_subdev_core_ops = {
+	.log_status		= v4l2_ctrl_subdev_log_status,
+	.subscribe_event	= v4l2_ctrl_subdev_subscribe_event,
+	.unsubscribe_event	= v4l2_event_subdev_unsubscribe,
+};
+
+static const struct v4l2_subdev_video_ops ov1063x_subdev_video_ops = {
+	.s_stream	= ov1063x_s_stream,
+};
+
+
+
+static int ov1063x_get_routing(struct v4l2_subdev *sd,
+		   struct v4l2_subdev_krouting *routing)
+{
+	//struct ov1063x_priv *priv = to_ov1063x_mux(sd);
+	struct v4l2_subdev_route *route = routing->routes;
+
+	if (routing->num_routes < 2) {
+		routing->num_routes = 2;
+		return -ENOSPC;
+	}
+
+	routing->num_routes = 0;
+
+	// Pixel stream
+	route->sink_pad = 0;
+	route->sink_stream = 0;
+	route->source_pad = 2;
+	route->source_stream = 0;
+	route->flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE | V4L2_SUBDEV_ROUTE_FL_IMMUTABLE;
+	route++;
+	routing->num_routes++;
+
+#ifdef META_HACK
+	// Meta stream
+	route->sink_pad = 1;
+	route->sink_stream = 0;
+	route->source_pad = 2;
+	route->source_stream = 1;
+	route->flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE | V4L2_SUBDEV_ROUTE_FL_IMMUTABLE;
+	route++;
+	routing->num_routes++;
+#endif
+	return 0;
+}
+
+static int ov1063x_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
+			      struct v4l2_mbus_frame_desc *fd)
+{
+	struct ov1063x_priv *priv = to_ov1063x_mux(sd);
+	struct v4l2_mbus_framefmt *fmt = &priv->format;
+
+	memset(fd, 0, sizeof(*fd));
+	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_PARALLEL;
+
+	fd->entry[fd->num_entries].stream = 0;
+
+	fd->entry[fd->num_entries].flags = V4L2_MBUS_FRAME_DESC_FL_LEN_MAX;
+	fd->entry[fd->num_entries].length = fmt->width * (fmt->height - META_HACK) * 16 / 8;
+	fd->entry[fd->num_entries].pixelcode = fmt->code;
+
+	fd->num_entries++;
+
+#ifdef META_HACK
+	fd->entry[fd->num_entries].stream = 1;
+
+	fd->entry[fd->num_entries].flags = V4L2_MBUS_FRAME_DESC_FL_LEN_MAX;
+	fd->entry[fd->num_entries].length = fmt->width * META_HACK * 16 / 8;
+	fd->entry[fd->num_entries].pixelcode = MEDIA_BUS_FMT_METADATA_16;
+
+	fd->num_entries++;
+#endif
+	return 0;
+}
+
+static int ov1063x_sensor_get_fmt(struct v4l2_subdev *sd,
+			   struct v4l2_subdev_pad_config *cfg,
+			   struct v4l2_subdev_format *fmt);
+
+static int ov1063x_mux_get_fmt(struct v4l2_subdev *sd,
+			   struct v4l2_subdev_pad_config *cfg,
+			   struct v4l2_subdev_format *fmt)
+{
+	struct ov1063x_priv *priv = to_ov1063x_mux(sd);
+
+	if (fmt->pad == 2)
+		return -ENOIOCTLCMD;
+
+	return ov1063x_sensor_get_fmt(&priv->sensor_subdev, cfg, fmt);
+}
+
+
+static const struct v4l2_subdev_pad_ops ov1063x_subdev_pad_ops = {
+	.get_routing	= ov1063x_get_routing,
+	.get_frame_desc	= ov1063x_get_frame_desc,
+	.get_fmt	= ov1063x_mux_get_fmt,
+};
+
+static const struct media_entity_operations sensor_entity_ops = {
+	.link_validate = v4l2_subdev_link_validate,
+};
+
+static const struct v4l2_subdev_ops ov1063x_sensor_subdev_ops;
+
+static int ov1063x_create_sensor_subdev(struct ov1063x_priv *priv, struct v4l2_device *v4l2_dev)
+{
+	struct v4l2_subdev *sd;
+	int ret;
+
+	sd = &priv->sensor_subdev;
+	v4l2_subdev_init(sd, &ov1063x_sensor_subdev_ops);
+	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	snprintf(sd->name, sizeof(sd->name), "%s SENSOR", priv->mux_subdev.name);
+	//sd->dev = &client->dev;
+	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sd->entity.ops = &sensor_entity_ops;
+
+	priv->sensor_pads[0].flags = MEDIA_PAD_FL_SOURCE;
+	priv->sensor_pads[1].flags = MEDIA_PAD_FL_SOURCE;
+	ret = media_entity_pads_init(&sd->entity, 2, priv->sensor_pads);
+	if (ret < 0)
+		return -EINVAL;
+		//goto err_ctrls;
+
+	ret = v4l2_device_register_subdev(v4l2_dev, sd);
+	if (ret < 0)
+		return -EINVAL;
+		//goto err_pm;
+
+	ret = media_create_pad_link(&priv->sensor_subdev.entity, 0,
+				    &priv->mux_subdev.entity, 0,
+				    MEDIA_LNK_FL_ENABLED | MEDIA_LNK_FL_IMMUTABLE);
+	if (ret)
+		return -EINVAL;
+
+	ret = media_create_pad_link(&priv->sensor_subdev.entity, 1,
+				    &priv->mux_subdev.entity, 1,
+				    MEDIA_LNK_FL_ENABLED | MEDIA_LNK_FL_IMMUTABLE);
+	if (ret)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int ov1063x_sensor_init_cfg(struct v4l2_subdev *sd,
+			    struct v4l2_subdev_pad_config *cfg);
+
+static int ov_registered(struct v4l2_subdev *sd)
+{
+	struct ov1063x_priv *priv = to_ov1063x_mux(sd);
+	//struct v4l2_subdev *mux_sd = sd;
+	//struct v4l2_subdev *pix_sd;
+	int ret;
+	struct v4l2_device *v4l2_dev = sd->v4l2_dev;
+
+	ret = ov1063x_create_sensor_subdev(priv, v4l2_dev);
+	if (ret) {
+		printk("PIX SUBDEV FAILED\n");
+		return ret;
+	}
+
+	ov1063x_sensor_init_cfg(&priv->sensor_subdev, NULL);
+
+	return 0;
+}
+
+static void ov_unregistered(struct v4l2_subdev *sd)
+{
+	struct ov1063x_priv *priv = to_ov1063x_mux(sd);
+
+	v4l2_device_unregister_subdev(&priv->sensor_subdev);
+}
+
+static struct v4l2_subdev_internal_ops ov_int_ops = {
+	.registered = ov_registered,
+	.unregistered = ov_unregistered,
+
+};
+
+static const struct v4l2_subdev_ops ov1063x_mux_subdev_ops = {
+	.core	= &ov1063x_subdev_core_ops,
+	.video	= &ov1063x_subdev_video_ops,
+	.pad	= &ov1063x_subdev_pad_ops,
+};
+
+
+
+
+
+
+static int ov1063x_sensor_init_cfg(struct v4l2_subdev *sd,
 			    struct v4l2_subdev_pad_config *cfg)
 {
 	u32 which = cfg ? V4L2_SUBDEV_FORMAT_TRY : V4L2_SUBDEV_FORMAT_ACTIVE;
-	struct ov1063x_priv *priv = to_ov1063x(sd);
+	struct ov1063x_priv *priv = to_ov1063x_sensor(sd);
 	struct v4l2_mbus_framefmt *format;
 
 	format = __ov1063x_get_pad_format(priv, cfg, 0, which);
@@ -1192,23 +1401,37 @@ static int ov1063x_init_cfg(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int ov1063x_enum_mbus_code(struct v4l2_subdev *sd,
+static int ov1063x_sensor_enum_mbus_code(struct v4l2_subdev *sd,
 				  struct v4l2_subdev_pad_config *cfg,
 				  struct v4l2_subdev_mbus_code_enum *code)
 {
-	if (code->index >= ARRAY_SIZE(ov1063x_mbus_formats))
-		return -EINVAL;
+	if (code->pad == 0) {
+		if (code->index >= ARRAY_SIZE(ov1063x_mbus_formats))
+			return -EINVAL;
 
-	code->code = ov1063x_mbus_formats[code->index];
+		code->code = ov1063x_mbus_formats[code->index];
 
-	return 0;
+		return 0;
+	} else if (code->pad == 1) {
+		if (code->index != 0)
+			return -EINVAL;
+
+		code->code = MEDIA_BUS_FMT_METADATA_16;
+
+		return 0;
+	}
+
+	return -ENOIOCTLCMD;
 }
 
-static int ov1063x_enum_frame_sizes(struct v4l2_subdev *sd,
+static int ov1063x_sensor_enum_frame_sizes(struct v4l2_subdev *sd,
 				    struct v4l2_subdev_pad_config *cfg,
 				    struct v4l2_subdev_frame_size_enum *fse)
 {
 	unsigned int i;
+
+	if (fse->pad != 0)
+		return -ENOIOCTLCMD;
 
 	for (i = 0; i < ARRAY_SIZE(ov1063x_mbus_formats); ++i) {
 		if (ov1063x_mbus_formats[i] == fse->code)
@@ -1229,28 +1452,42 @@ static int ov1063x_enum_frame_sizes(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int ov1063x_get_fmt(struct v4l2_subdev *sd,
+static int ov1063x_sensor_get_fmt(struct v4l2_subdev *sd,
 			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
-	struct ov1063x_priv *priv = to_ov1063x(sd);
+	struct ov1063x_priv *priv = to_ov1063x_sensor(sd);
 
-	fmt->format = *__ov1063x_get_pad_format(priv, cfg, fmt->pad,
-						fmt->which);
+	if (fmt->pad == 0) {
+		fmt->format = *__ov1063x_get_pad_format(priv, cfg, 0, fmt->which);
+
+#ifdef META_HACK
+		fmt->format.height -= META_HACK;
+#endif
+	} else if (fmt->pad == 1) {
+		fmt->format = *__ov1063x_get_pad_format(priv, cfg, 0, fmt->which);
+		fmt->format.code = MEDIA_BUS_FMT_METADATA_16;
+		fmt->format.height = META_HACK;
+	} else {
+		return -ENOIOCTLCMD;
+	}
 
 	return 0;
 }
 
-static int ov1063x_set_fmt(struct v4l2_subdev *sd,
+static int ov1063x_sensor_set_fmt(struct v4l2_subdev *sd,
 			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
-	struct ov1063x_priv *priv = to_ov1063x(sd);
+	struct ov1063x_priv *priv = to_ov1063x_sensor(sd);
 	struct v4l2_mbus_framefmt *format;
 	const struct v4l2_area *fsize;
 	unsigned int i;
 	u32 code;
 	int ret = 0;
+
+	if (fmt->pad == 1)
+		return ov1063x_sensor_get_fmt(sd, cfg, fmt);
 
 	/*
 	 * Validate the media bus code, defaulting to the first one if the
@@ -1266,6 +1503,10 @@ static int ov1063x_set_fmt(struct v4l2_subdev *sd,
 	if (i == ARRAY_SIZE(ov1063x_mbus_formats))
 		code = ov1063x_mbus_formats[0];
 
+#ifdef META_HACK
+	fmt->format.height += META_HACK;
+#endif
+
 	/* Find the nearest supported frame size. */
 	fsize = v4l2_find_nearest_size(ov1063x_framesizes,
 				       ARRAY_SIZE(ov1063x_framesizes),
@@ -1273,7 +1514,7 @@ static int ov1063x_set_fmt(struct v4l2_subdev *sd,
 				       fmt->format.height);
 
 	/* Update the stored format and return it. */
-	format = __ov1063x_get_pad_format(priv, cfg, fmt->pad, fmt->which);
+	format = __ov1063x_get_pad_format(priv, cfg, 0, fmt->which);
 
 	mutex_lock(priv->hdl.lock);
 
@@ -1336,35 +1577,28 @@ static int ov1063x_set_fmt(struct v4l2_subdev *sd,
 
 	fmt->format = *format;
 
+#ifdef META_HACK
+	fmt->format.height -= META_HACK;
+#endif
+
 done:
 	mutex_unlock(priv->hdl.lock);
 
 	return ret;
 }
 
-static const struct v4l2_subdev_core_ops ov1063x_subdev_core_ops = {
-	.log_status		= v4l2_ctrl_subdev_log_status,
-	.subscribe_event	= v4l2_ctrl_subdev_subscribe_event,
-	.unsubscribe_event	= v4l2_event_subdev_unsubscribe,
+static const struct v4l2_subdev_pad_ops ov1063x_sensor_subdev_pad_ops = {
+	.init_cfg		= ov1063x_sensor_init_cfg,
+	.enum_mbus_code		= ov1063x_sensor_enum_mbus_code,
+	.enum_frame_size	= ov1063x_sensor_enum_frame_sizes,
+	.get_fmt		= ov1063x_sensor_get_fmt,
+	.set_fmt		= ov1063x_sensor_set_fmt,
 };
 
-static const struct v4l2_subdev_video_ops ov1063x_subdev_video_ops = {
-	.s_stream	= ov1063x_s_stream,
+static const struct v4l2_subdev_ops ov1063x_sensor_subdev_ops = {
+	.pad	= &ov1063x_sensor_subdev_pad_ops,
 };
 
-static const struct v4l2_subdev_pad_ops ov1063x_subdev_pad_ops = {
-	.init_cfg		= ov1063x_init_cfg,
-	.enum_mbus_code		= ov1063x_enum_mbus_code,
-	.enum_frame_size	= ov1063x_enum_frame_sizes,
-	.get_fmt		= ov1063x_get_fmt,
-	.set_fmt		= ov1063x_set_fmt,
-};
-
-static const struct v4l2_subdev_ops ov1063x_subdev_ops = {
-	.core	= &ov1063x_subdev_core_ops,
-	.video	= &ov1063x_subdev_video_ops,
-	.pad	= &ov1063x_subdev_pad_ops,
-};
 
 /* -----------------------------------------------------------------------------
  * Power Management
@@ -1442,7 +1676,7 @@ static int ov1063x_runtime_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct v4l2_subdev *subdev = i2c_get_clientdata(client);
-	struct ov1063x_priv *priv = to_ov1063x(subdev);
+	struct ov1063x_priv *priv = to_ov1063x_mux(subdev);
 	int ret;
 
 	ret = ov1063x_power_on(priv);
@@ -1462,7 +1696,7 @@ static int ov1063x_runtime_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct v4l2_subdev *subdev = i2c_get_clientdata(client);
-	struct ov1063x_priv *priv = to_ov1063x(subdev);
+	struct ov1063x_priv *priv = to_ov1063x_mux(subdev);
 
 	ov1063x_power_off(priv);
 
@@ -1509,6 +1743,21 @@ static int ov1063x_detect(struct ov1063x_priv *priv)
 static const struct regmap_config ov1063x_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
+};
+
+
+static bool ds90_has_route(struct media_entity *entity,
+                           unsigned int pad0, unsigned int pad1)
+{
+	//struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
+	//struct ds90_data *priv = sd_to_ds90(sd);
+
+	return pad1 == 2 && pad0 == 0;
+}
+
+static const struct media_entity_operations ds90_entity_ops = {
+	.link_validate = v4l2_subdev_link_validate,
+	.has_route = ds90_has_route
 };
 
 static int ov1063x_probe(struct i2c_client *client)
@@ -1571,8 +1820,9 @@ static int ov1063x_probe(struct i2c_client *client)
 	}
 
 	/* Initialize the subdev and its controls. */
-	sd = &priv->subdev;
-	v4l2_i2c_subdev_init(sd, client, &ov1063x_subdev_ops);
+	sd = &priv->mux_subdev;
+	v4l2_i2c_subdev_init(sd, client, &ov1063x_mux_subdev_ops);
+	sd->internal_ops = &ov_int_ops;
 	v4l2_i2c_subdev_set_name(sd, client, priv->name, NULL);
 
 	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
@@ -1598,12 +1848,14 @@ static int ov1063x_probe(struct i2c_client *client)
 	/* Default framerate */
 	priv->fps_numerator = 30;
 	priv->fps_denominator = 1;
-	ov1063x_init_cfg(&priv->subdev, NULL);
 
 	/* Initialize the media entity. */
-	priv->pad.flags = MEDIA_PAD_FL_SOURCE;
+	priv->mux_pads[0].flags = MEDIA_PAD_FL_SINK;
+	priv->mux_pads[1].flags = MEDIA_PAD_FL_SINK;
+	priv->mux_pads[2].flags = MEDIA_PAD_FL_SOURCE | MEDIA_PAD_FL_MULTIPLEXED;
 	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
-	ret = media_entity_pads_init(&sd->entity, 1, &priv->pad);
+	sd->entity.ops = &ds90_entity_ops;
+	ret = media_entity_pads_init(&sd->entity, 3, priv->mux_pads);
 	if (ret < 0)
 		goto err_ctrls;
 
@@ -1652,7 +1904,7 @@ static int ov1063x_probe(struct i2c_client *client)
 
 err_pm:
 	pm_runtime_disable(priv->dev);
-	media_entity_cleanup(&priv->subdev.entity);
+	media_entity_cleanup(&priv->mux_subdev.entity);
 err_ctrls:
 	v4l2_ctrl_handler_free(&priv->hdl);
 err_power:
@@ -1664,12 +1916,11 @@ err_power:
 static int ov1063x_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
-	struct ov1063x_priv *priv = to_ov1063x(sd);
+	struct ov1063x_priv *priv = to_ov1063x_mux(sd);
 
 	v4l2_ctrl_handler_free(&priv->hdl);
-	v4l2_async_unregister_subdev(&priv->subdev);
-	media_entity_cleanup(&priv->subdev.entity);
-
+	v4l2_async_unregister_subdev(&priv->mux_subdev);
+	media_entity_cleanup(&priv->mux_subdev.entity);
 	/*
 	 * Disable runtime PM. In case runtime PM is disabled in the kernel,
 	 * make sure to turn power off manually.
