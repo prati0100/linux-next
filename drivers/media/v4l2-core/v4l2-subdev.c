@@ -1000,6 +1000,102 @@ bool v4l2_subdev_has_route(struct v4l2_subdev_krouting *routing,
 }
 EXPORT_SYMBOL_GPL(v4l2_subdev_has_route);
 
+int v4l2_subdev_get_format_dir(struct media_pad *pad, u16 stream,
+			       enum v4l2_direction dir,
+			       struct v4l2_subdev_format *fmt)
+{
+	struct device *dev = pad->entity->graph_obj.mdev->dev;
+	int ret;
+	int i;
+
+	dev_dbg(dev, "%s '%s':%u:%u %s\n", __func__,
+		pad->entity->name, pad->index, stream,
+		dir == V4L2_DIR_SOURCEWARD ? "sourceward" : "sinkward");
+
+	while (true) {
+		struct v4l2_subdev_krouting routing;
+		struct v4l2_subdev_route *route;
+
+		if (pad->entity->obj_type != MEDIA_ENTITY_TYPE_V4L2_SUBDEV)
+			return -EINVAL;
+
+		ret = v4l2_subdev_link_validate_get_format(pad, fmt);
+		if (ret == 0)
+			return 0;
+		else if (ret != -ENOIOCTLCMD)
+			return ret;
+
+		if (pad->flags &
+		    (dir == V4L2_DIR_SINKWARD ? MEDIA_PAD_FL_SOURCE :
+						MEDIA_PAD_FL_SINK)) {
+			pad = media_entity_remote_pad(pad);
+
+			if (!pad)
+				return -EINVAL;
+
+			if (pad->entity->obj_type != MEDIA_ENTITY_TYPE_V4L2_SUBDEV)
+				return -EINVAL;
+
+			ret = v4l2_subdev_link_validate_get_format(pad, fmt);
+			if (ret == 0)
+				return 0;
+			else if (ret != -ENOIOCTLCMD)
+				return ret;
+		}
+
+		ret = v4l2_subdev_get_krouting(media_entity_to_v4l2_subdev(pad->entity), &routing);
+		if (ret)
+			return ret;
+
+		route = NULL;
+		for (i = 0; i < routing.num_routes; ++i) {
+			u16 near_pad = dir == V4L2_DIR_SINKWARD ?
+					       routing.routes[i].sink_pad :
+					       routing.routes[i].source_pad;
+			u16 near_stream = dir == V4L2_DIR_SINKWARD ?
+						  routing.routes[i].sink_stream :
+						  routing.routes[i].source_stream;
+
+			if (!(routing.routes[i].flags & V4L2_SUBDEV_ROUTE_FL_ACTIVE))
+				continue;
+
+			if (near_pad != pad->index)
+				continue;
+
+			if (near_stream != stream)
+				continue;
+
+			if (route) {
+				dev_err(dev,
+					"%s: '%s' has multiple active routes for stream %u\n",
+					__func__, pad->entity->name, stream);
+				v4l2_subdev_free_routing(&routing);
+				return -EINVAL;
+			}
+
+			route = &routing.routes[i];
+		}
+
+		if (!route) {
+			dev_err(dev, "%s: no route found in '%s' for stream %u\n",
+				__func__, pad->entity->name, stream);
+			v4l2_subdev_free_routing(&routing);
+			return -EINVAL;
+		}
+
+		if (dir == V4L2_DIR_SINKWARD) {
+			pad = &pad->entity->pads[route->source_pad];
+			stream = route->source_stream;
+		} else {
+			pad = &pad->entity->pads[route->sink_pad];
+			stream = route->sink_stream;
+		}
+
+		v4l2_subdev_free_routing(&routing);
+	}
+}
+EXPORT_SYMBOL_GPL(v4l2_subdev_get_format_dir);
+
 int v4l2_subdev_link_validate(struct media_link *link)
 {
 	struct v4l2_subdev *sink;

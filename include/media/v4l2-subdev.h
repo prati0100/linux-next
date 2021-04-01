@@ -1249,4 +1249,30 @@ void v4l2_subdev_cpy_routing(struct v4l2_subdev_krouting *dst,
 bool v4l2_subdev_has_route(struct v4l2_subdev_krouting *routing,
 			   unsigned int pad0, unsigned int pad1);
 
+/**
+ * enum v4l2_direction - Direction either towards the source or the sink
+ *
+ * @V4L2_DIR_SOURCEWARD: Direction towards the source.
+ * @V4L2_DIR_SINKWARD: Direction towards the sink.
+ */
+enum v4l2_direction {
+	V4L2_DIR_SOURCEWARD,
+	V4L2_DIR_SINKWARD,
+};
+
+/**
+ * v4l2_subdev_get_format_dir() - Find format by following streams
+ * @pad: The pad from which to start the search
+ * @stream: The stream for which we want to find the format
+ * @dir: The direction of the search
+ * @fmt: Pointer to &struct v4l2_subdev_format where the found format is stored
+ *
+ * This function attempts to find v4l2_subdev_format for a specific stream on a
+ * multiplexed pad by following the stream using routes and links to the specified
+ * direction, until a non-multiplexed pad is found.
+ */
+int v4l2_subdev_get_format_dir(struct media_pad *pad, u16 stream,
+			       enum v4l2_direction dir,
+			       struct v4l2_subdev_format *fmt);
+
 #endif
