@@ -1096,14 +1096,154 @@ int v4l2_subdev_get_format_dir(struct media_pad *pad, u16 stream,
 }
 EXPORT_SYMBOL_GPL(v4l2_subdev_get_format_dir);
 
+static int v4l2_subdev_link_validate_routing_stream(
+	struct media_link *link, struct media_pad *sink_pad, u16 sink_stream,
+	struct media_pad *source_pad, u16 source_stream)
+{
+	struct v4l2_subdev_format source_fmt;
+	struct v4l2_subdev_format sink_fmt;
+	struct v4l2_subdev *sink_sd;
+	int ret;
+
+	ret = v4l2_subdev_get_format_dir(sink_pad, sink_stream,
+					 V4L2_DIR_SINKWARD, &sink_fmt);
+	if (ret)
+		return ret;
+
+	ret = v4l2_subdev_get_format_dir(source_pad, source_stream,
+					 V4L2_DIR_SOURCEWARD, &source_fmt);
+	if (ret)
+		return ret;
+
+	sink_sd = media_entity_to_v4l2_subdev(sink_pad->entity);
+
+	ret = v4l2_subdev_call(sink_sd, pad, link_validate, link, &source_fmt,
+			       &sink_fmt);
+	if (ret != -ENOIOCTLCMD)
+		return ret;
+
+	ret = v4l2_subdev_link_validate_default(sink_sd, link, &source_fmt,
+						&sink_fmt);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int v4l2_subdev_link_validate_routing(struct media_link *link)
+{
+	int ret;
+	unsigned int i, j;
+
+	struct route_info {
+		struct v4l2_subdev_krouting routing;
+		struct media_pad *pad;
+		struct v4l2_subdev *subdev;
+	};
+
+	struct route_info source_route_info = {
+		.pad = link->source,
+		.subdev = media_entity_to_v4l2_subdev(link->source->entity),
+	};
+
+	struct route_info sink_route_info = {
+		.pad = link->sink,
+		.subdev = media_entity_to_v4l2_subdev(link->sink->entity),
+	};
+
+	struct device *dev = sink_route_info.subdev->entity.graph_obj.mdev->dev;
+
+	dev_dbg(dev, "validating link \"%s\":%u -> \"%s\":%u\n",
+		link->source->entity->name, link->source->index,
+		link->sink->entity->name, link->sink->index);
+
+	ret = v4l2_subdev_get_krouting(source_route_info.subdev,
+				       &source_route_info.routing);
+	if (ret)
+		return ret;
+
+	ret = v4l2_subdev_get_krouting(sink_route_info.subdev,
+				       &sink_route_info.routing);
+	if (ret) {
+		v4l2_subdev_free_routing(&source_route_info.routing);
+		return ret;
+	}
+
+	/*
+	 * Every active sink route needs an active source route, but it's ok
+	 * to have active source routes without matching sink route.
+	 */
+	for (i = 0; i < sink_route_info.routing.num_routes; ++i) {
+		struct v4l2_subdev_route *sink_route =
+			&sink_route_info.routing.routes[i];
+
+		if (!(sink_route->flags & V4L2_SUBDEV_ROUTE_FL_ACTIVE))
+			continue;
+
+		if (sink_route->sink_pad != sink_route_info.pad->index)
+			continue;
+
+		for (j = 0; j < source_route_info.routing.num_routes; ++j) {
+			struct v4l2_subdev_route *source_route =
+				&source_route_info.routing.routes[j];
+
+			if (!(source_route->flags &
+			      V4L2_SUBDEV_ROUTE_FL_ACTIVE))
+				continue;
+
+			if (source_route->source_pad !=
+			    source_route_info.pad->index)
+				continue;
+
+			if (source_route->source_stream !=
+			    sink_route->sink_stream)
+				continue;
+
+			ret = v4l2_subdev_link_validate_routing_stream(
+				link,
+				&sink_route_info.pad->entity
+					 ->pads[sink_route->sink_pad],
+				sink_route->sink_stream,
+				&source_route_info.pad->entity
+					 ->pads[source_route->source_pad],
+				source_route->source_stream);
+			if (ret)
+				goto out;
+
+			break;
+		}
+
+		if (j == source_route_info.routing.num_routes) {
+			dev_err(dev,
+				"%s: no active source route found for sink route '%s':%u:%u\n",
+				__func__, sink_route_info.pad->entity->name,
+				sink_route->sink_pad, sink_route->sink_stream);
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+out:
+	v4l2_subdev_free_routing(&source_route_info.routing);
+	v4l2_subdev_free_routing(&sink_route_info.routing);
+
+	return ret;
+}
+
 int v4l2_subdev_link_validate(struct media_link *link)
 {
 	struct v4l2_subdev *sink;
 	struct v4l2_subdev_format sink_fmt, source_fmt;
 	int rval;
 
-	rval = v4l2_subdev_link_validate_get_format(
-		link->source, &source_fmt);
+	if (WARN_ON((link->source->flags & MEDIA_PAD_FL_MULTIPLEXED) !=
+		    (link->sink->flags & MEDIA_PAD_FL_MULTIPLEXED)))
+		return -EINVAL;
+
+	if (link->source->flags & MEDIA_PAD_FL_MULTIPLEXED)
+		return v4l2_subdev_link_validate_routing(link);
+
+	rval = v4l2_subdev_link_validate_get_format(link->source, &source_fmt);
 	if (rval < 0)
 		return 0;
 
