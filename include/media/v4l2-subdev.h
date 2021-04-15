@@ -1235,4 +1235,18 @@ extern const struct v4l2_subdev_ops v4l2_subdev_call_wrappers;
 void v4l2_subdev_notify_event(struct v4l2_subdev *sd,
 			      const struct v4l2_event *ev);
 
+int v4l2_subdev_get_krouting(struct v4l2_subdev *sd,
+			     struct v4l2_subdev_krouting *routing);
+
+void v4l2_subdev_free_routing(struct v4l2_subdev_krouting *routing);
+
+int v4l2_subdev_dup_routing(struct v4l2_subdev_krouting *dst,
+			    const struct v4l2_subdev_krouting *src);
+
+void v4l2_subdev_cpy_routing(struct v4l2_subdev_krouting *dst,
+			     const struct v4l2_subdev_krouting *src);
+
+bool v4l2_subdev_has_route(struct v4l2_subdev_krouting *routing,
+			   unsigned int pad0, unsigned int pad1);
+
 #endif
