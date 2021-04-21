@@ -2639,6 +2639,7 @@ static int dispc_init_am65x_oldi_io_ctrl(struct device *dev,
 
 static void dispc_init_errata(struct dispc_device *dispc)
 {
+#if 0
 	static const struct soc_device_attribute am65x_sr10_soc_devices[] = {
 		{ .family = "AM65X", .revision = "SR1.0" },
 		{ /* sentinel */ }
@@ -2648,6 +2649,7 @@ static void dispc_init_errata(struct dispc_device *dispc)
 		dispc->errata.i2000 = true;
 		dev_info(dispc->dev, "WA for erratum i2000: YUV formats disabled\n");
 	}
+#endif
 }
 
 int dispc_init(struct tidss_device *tidss)
