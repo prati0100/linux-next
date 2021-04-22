@@ -361,6 +361,7 @@ Types and flags used to represent the media graph elements
 .. _MEDIA-PAD-FL-SINK:
 .. _MEDIA-PAD-FL-SOURCE:
 .. _MEDIA-PAD-FL-MUST-CONNECT:
+.. _MEDIA-PAD-FL-MULTIPLEXED:
 
 .. flat-table:: Media pad flags
     :header-rows:  0
@@ -381,6 +382,11 @@ Types and flags used to represent the media graph elements
 	  configuration dependent) for the pad to need enabled links even
 	  when this flag isn't set; the absence of the flag doesn't imply
 	  there is none.
+
+    *  -  ``MEDIA_PAD_FL_MULTIPLEXED``
+       -  The pad has multiplexed streams. A pad with multiplexed streams
+          won't support pad format configuration and e.g. VIDIOC_SUBDEV_S_FMT
+          should return -ENOIOCTLCMD.
 
 
 One and only one of ``MEDIA_PAD_FL_SINK`` and ``MEDIA_PAD_FL_SOURCE``
