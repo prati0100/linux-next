@@ -49,15 +49,25 @@ static s64 cal_camerarx_get_ext_link_freq(struct cal_camerarx *phy)
 {
 	struct v4l2_fwnode_bus_mipi_csi2 *mipi_csi2 = &phy->endpoint.bus.mipi_csi2;
 	u32 num_lanes = mipi_csi2->num_data_lanes;
-	const struct cal_format_info *fmtinfo;
 	u32 bpp;
 	s64 freq;
 
-	fmtinfo = cal_format_by_code(phy->formats[CAL_CAMERARX_PAD_SINK].code);
-	if (!fmtinfo)
-		return -EINVAL;
+	/*
+	 * With multistream input we don't have bpp, and cannot use
+	 * V4L2_CID_PIXEL_RATE. Passing 0 as bpp causes v4l2_get_link_freq()
+	 * to return an error if it falls back to V4L2_CID_PIXEL_RATE.
+	 */
+	if (cal_streams_api) {
+		bpp = 0;
+	} else {
+		const struct cal_format_info *fmtinfo;
 
-	bpp = fmtinfo->bpp;
+		fmtinfo = cal_format_by_code(phy->formats[CAL_CAMERARX_PAD_SINK].code);
+		if (!fmtinfo)
+			return -EINVAL;
+
+		bpp = fmtinfo->bpp;
+	}
 
 	freq = v4l2_get_link_freq(phy->source->ctrl_handler, bpp, 2 * num_lanes);
 	if (freq < 0) {
@@ -619,6 +629,17 @@ static inline struct cal_camerarx *to_cal_camerarx(struct v4l2_subdev *sd)
 	return container_of(sd, struct cal_camerarx, subdev);
 }
 
+struct cal_camerarx *cal_camerarx_get_phy_from_entity(struct media_entity *entity)
+{
+	struct v4l2_subdev *sd;
+
+	sd = media_entity_to_v4l2_subdev(entity);
+	if (!sd)
+		return NULL;
+
+	return to_cal_camerarx(sd);
+}
+
 static struct v4l2_mbus_framefmt *
 cal_camerarx_get_pad_format(struct cal_camerarx *phy,
 			    struct v4l2_subdev_pad_config *cfg,
@@ -657,6 +678,18 @@ static int cal_camerarx_sd_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct cal_camerarx *phy = to_cal_camerarx(sd);
 	int r = 0;
+
+	if (cal_streams_api) {
+		if (cal_rx_pad_is_sink(code->pad))
+			return -ENOIOCTLCMD;
+
+		if (code->index >= cal_num_formats)
+			return -EINVAL;
+
+		code->code = cal_formats[code->index].code;
+
+		return 0;
+	}
 
 	mutex_lock(&phy->mutex);
 
@@ -698,6 +731,22 @@ static int cal_camerarx_sd_enum_frame_size(struct v4l2_subdev *sd,
 
 	if (fse->index > 0)
 		return -EINVAL;
+
+	if (cal_streams_api) {
+		if (cal_rx_pad_is_sink(fse->pad))
+			return -ENOIOCTLCMD;
+
+		fmtinfo = cal_format_by_code(fse->code);
+		if (!fmtinfo)
+			return -EINVAL;
+
+		fse->min_width = CAL_MIN_WIDTH_BYTES * 8 / ALIGN(fmtinfo->bpp, 8);
+		fse->max_width = CAL_MAX_WIDTH_BYTES * 8 / ALIGN(fmtinfo->bpp, 8);
+		fse->min_height = CAL_MIN_HEIGHT_LINES;
+		fse->max_height = CAL_MAX_HEIGHT_LINES;
+
+		return 0;
+	}
 
 	mutex_lock(&phy->mutex);
 
@@ -745,6 +794,9 @@ static int cal_camerarx_sd_get_fmt(struct v4l2_subdev *sd,
 	struct cal_camerarx *phy = to_cal_camerarx(sd);
 	struct v4l2_mbus_framefmt *fmt;
 
+	if (cal_streams_api && cal_rx_pad_is_sink(format->pad))
+		return -ENOIOCTLCMD;
+
 	mutex_lock(&phy->mutex);
 
 	fmt = cal_camerarx_get_pad_format(phy, cfg, format->pad, format->which);
@@ -764,8 +816,11 @@ static int cal_camerarx_sd_set_fmt(struct v4l2_subdev *sd,
 	struct v4l2_mbus_framefmt *fmt;
 	unsigned int bpp;
 
+	if (cal_streams_api && cal_rx_pad_is_sink(format->pad))
+		return -ENOIOCTLCMD;
+
 	/* No transcoding, source and sink formats must match. */
-	if (cal_rx_pad_is_source(format->pad))
+	if (!cal_streams_api && cal_rx_pad_is_source(format->pad))
 		return cal_camerarx_sd_get_fmt(sd, cfg, format);
 
 	/*
@@ -788,17 +843,27 @@ static int cal_camerarx_sd_set_fmt(struct v4l2_subdev *sd,
 	format->format.code = fmtinfo->code;
 	format->format.field = V4L2_FIELD_NONE;
 
-	/* Store the format and propagate it to the source pad. */
-
 	mutex_lock(&phy->mutex);
 
-	fmt = cal_camerarx_get_pad_format(phy, cfg, CAL_CAMERARX_PAD_SINK,
-					  format->which);
-	*fmt = format->format;
+	if (!cal_streams_api) {
+		unsigned int i;
 
-	fmt = cal_camerarx_get_pad_format(phy, cfg, CAL_CAMERARX_PAD_FIRST_SOURCE,
-					  format->which);
-	*fmt = format->format;
+		/* Store the format and propagate it to the source pads. */
+
+		fmt = cal_camerarx_get_pad_format(phy, cfg, CAL_CAMERARX_PAD_SINK,
+						  format->which);
+		*fmt = format->format;
+
+		for (i = CAL_CAMERARX_PAD_FIRST_SOURCE; i < CAL_CAMERARX_NUM_PADS; ++i) {
+			fmt = cal_camerarx_get_pad_format(phy, cfg, i, format->which);
+			*fmt = format->format;
+		}
+	} else {
+		/* Store the format */
+
+		fmt = cal_camerarx_get_pad_format(phy, cfg, format->pad, format->which);
+		*fmt = format->format;
+	}
 
 	mutex_unlock(&phy->mutex);
 
@@ -839,23 +904,38 @@ static int cal_camerarx_sd_set_routing(struct v4l2_subdev *sd,
 static int cal_camerarx_sd_init_cfg(struct v4l2_subdev *sd,
 				    struct v4l2_subdev_pad_config *cfg)
 {
-	struct v4l2_subdev_format format = {
-		.which = cfg ? V4L2_SUBDEV_FORMAT_TRY
-		       : V4L2_SUBDEV_FORMAT_ACTIVE,
-		.pad = CAL_CAMERARX_PAD_SINK,
-		.format = {
-			.width = 640,
-			.height = 480,
-			.code = MEDIA_BUS_FMT_UYVY8_2X8,
-			.field = V4L2_FIELD_NONE,
-			.colorspace = V4L2_COLORSPACE_SRGB,
-			.ycbcr_enc = V4L2_YCBCR_ENC_601,
-			.quantization = V4L2_QUANTIZATION_LIM_RANGE,
-			.xfer_func = V4L2_XFER_FUNC_SRGB,
-		},
-	};
+	int i;
+	int ret;
+	u32 which = cfg ? V4L2_SUBDEV_FORMAT_TRY : V4L2_SUBDEV_FORMAT_ACTIVE;
 
-	return cal_camerarx_sd_set_fmt(sd, cfg, &format);
+	for (i = 0; i < CAL_CAMERARX_NUM_PADS; ++i) {
+		struct v4l2_subdev_format format = {
+			.which = which,
+			.pad = i,
+			.format = {
+				.width = 640,
+				.height = 480,
+				.code = MEDIA_BUS_FMT_UYVY8_2X8,
+				.field = V4L2_FIELD_NONE,
+				.colorspace = V4L2_COLORSPACE_SRGB,
+				.ycbcr_enc = V4L2_YCBCR_ENC_601,
+				.quantization = V4L2_QUANTIZATION_LIM_RANGE,
+				.xfer_func = V4L2_XFER_FUNC_SRGB,
+			},
+		};
+
+		if (!cal_streams_api && cal_rx_pad_is_source(i))
+			continue;
+
+		if (cal_streams_api && cal_rx_pad_is_sink(i))
+			continue;
+
+		ret = cal_camerarx_sd_set_fmt(sd, cfg, &format);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static const struct v4l2_subdev_video_ops cal_camerarx_video_ops = {
@@ -959,6 +1039,10 @@ struct cal_camerarx *cal_camerarx_create(struct cal_dev *cal,
 	sd->dev = cal->dev;
 
 	phy->pads[CAL_CAMERARX_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
+
+	if (cal_streams_api)
+		phy->pads[CAL_CAMERARX_PAD_SINK].flags |= MEDIA_PAD_FL_MULTIPLEXED;
+
 	for (i = CAL_CAMERARX_PAD_FIRST_SOURCE; i < CAL_CAMERARX_NUM_PADS; ++i)
 		phy->pads[i].flags = MEDIA_PAD_FL_SOURCE;
 	sd->entity.ops = &cal_camerarx_media_ops;
