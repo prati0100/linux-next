@@ -185,6 +185,8 @@ struct cal_camerarx {
 	struct mutex		mutex;
 
 	unsigned int enable_count;
+
+	struct v4l2_subdev_krouting routing;
 };
 
 struct cal_dev {
