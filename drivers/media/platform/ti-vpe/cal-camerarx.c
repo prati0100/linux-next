@@ -805,6 +805,37 @@ static int cal_camerarx_sd_set_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static int cal_camerarx_sd_get_routing(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_krouting *routing)
+{
+	struct cal_camerarx *phy = to_cal_camerarx(sd);
+	struct v4l2_subdev_krouting *src;
+
+	src = &phy->routing;
+
+	if (routing->num_routes < src->num_routes) {
+		routing->num_routes = src->num_routes;
+		return -ENOSPC;
+	}
+
+	v4l2_subdev_cpy_routing(routing, src);
+
+	return 0;
+}
+
+static int cal_camerarx_sd_set_routing(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_krouting *routing)
+{
+	struct cal_camerarx *phy = to_cal_camerarx(sd);
+	int ret;
+
+	ret = v4l2_subdev_dup_routing(&phy->routing, routing);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
 static int cal_camerarx_sd_init_cfg(struct v4l2_subdev *sd,
 				    struct v4l2_subdev_pad_config *cfg)
 {
@@ -837,6 +868,8 @@ static const struct v4l2_subdev_pad_ops cal_camerarx_pad_ops = {
 	.enum_frame_size = cal_camerarx_sd_enum_frame_size,
 	.get_fmt = cal_camerarx_sd_get_fmt,
 	.set_fmt = cal_camerarx_sd_set_fmt,
+	.get_routing = cal_camerarx_sd_get_routing,
+	.set_routing = cal_camerarx_sd_set_routing,
 };
 
 static const struct v4l2_subdev_ops cal_camerarx_subdev_ops = {
@@ -844,8 +877,18 @@ static const struct v4l2_subdev_ops cal_camerarx_subdev_ops = {
 	.pad = &cal_camerarx_pad_ops,
 };
 
+static bool cal_camerarx_has_route(struct media_entity *entity, unsigned int pad0,
+			  unsigned int pad1)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
+	struct cal_camerarx *phy = to_cal_camerarx(sd);
+
+	return v4l2_subdev_has_route(&phy->routing, pad0, pad1);
+}
+
 static struct media_entity_operations cal_camerarx_media_ops = {
 	.link_validate = v4l2_subdev_link_validate,
+	.has_route = cal_camerarx_has_route,
 };
 
 /* ------------------------------------------------------------------
@@ -861,6 +904,20 @@ struct cal_camerarx *cal_camerarx_create(struct cal_dev *cal,
 	struct v4l2_subdev *sd;
 	int ret;
 	unsigned int i;
+
+	struct v4l2_subdev_route routes[] = { {
+		.sink_pad = 0,
+		.sink_stream = 0,
+		.source_pad = 1,
+		.source_stream = 0,
+		.flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE,
+	} };
+
+	struct v4l2_subdev_krouting routing = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+		.num_routes = 1,
+		.routes = routes,
+	};
 
 	phy = kzalloc(sizeof(*phy), GFP_KERNEL);
 	if (!phy)
@@ -914,6 +971,11 @@ struct cal_camerarx *cal_camerarx_create(struct cal_dev *cal,
 	if (ret)
 		goto error;
 
+	/* Initialize routing to single route to the fist source pad */
+	ret = cal_camerarx_sd_set_routing(sd, &routing);
+	if (ret)
+		goto error;
+
 	ret = v4l2_device_register_subdev(&cal->v4l2_dev, sd);
 	if (ret)
 		goto error;
@@ -921,6 +983,7 @@ struct cal_camerarx *cal_camerarx_create(struct cal_dev *cal,
 	return phy;
 
 error:
+	v4l2_subdev_free_routing(&phy->routing);
 	media_entity_cleanup(&phy->subdev.entity);
 	kfree(phy);
 	return ERR_PTR(ret);
@@ -932,6 +995,7 @@ void cal_camerarx_destroy(struct cal_camerarx *phy)
 		return;
 
 	v4l2_device_unregister_subdev(&phy->subdev);
+	v4l2_subdev_free_routing(&phy->routing);
 	media_entity_cleanup(&phy->subdev.entity);
 	of_node_put(phy->source_ep_node);
 	of_node_put(phy->source_node);
