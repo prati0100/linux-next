@@ -53,6 +53,12 @@ bool cal_mc_api = CAL_MC_API_DEFAULT;
 module_param_named(mc_api, cal_mc_api, bool, 0444);
 MODULE_PARM_DESC(mc_api, "activates the MC API");
 
+bool cal_streams_api;
+module_param_named(streams_api, cal_streams_api, bool, 0444);
+MODULE_PARM_DESC(streams_api, "activates the multiplexed streams API");
+
+static struct cal_ctx *cal_ctx_create(struct cal_dev *cal, int inst);
+
 /* ------------------------------------------------------------------
  *	Format Handling
  * ------------------------------------------------------------------
@@ -977,7 +983,6 @@ static struct cal_ctx *cal_ctx_create(struct cal_dev *cal, int inst)
 		return NULL;
 
 	ctx->cal = cal;
-	ctx->phy = cal->phy[inst];
 	ctx->dma_ctx = inst;
 	ctx->csi2_ctx = inst;
 	ctx->cport = inst;
@@ -1188,18 +1193,33 @@ static int cal_probe(struct platform_device *pdev)
 	}
 
 	/* Create contexts. */
-	for (i = 0; i < cal->data->num_csi2_phy; ++i) {
-		if (!cal->phy[i]->source_node)
-			continue;
+	if (!cal_mc_api) {
+		for (i = 0; i < cal->data->num_csi2_phy; ++i) {
+			if (!cal->phy[i]->source_node)
+				continue;
 
-		cal->ctx[i] = cal_ctx_create(cal, i);
-		if (!cal->ctx[i]) {
-			cal_err(cal, "Failed to create context %u\n", i);
-			ret = -ENODEV;
-			goto error_context;
+			cal->ctx[i] = cal_ctx_create(cal, i);
+			if (!cal->ctx[i]) {
+				cal_err(cal, "Failed to create context %u\n", i);
+				ret = -ENODEV;
+				goto error_context;
+			}
+
+			cal->ctx[i]->phy = cal->phy[i];
+
+			cal->num_contexts++;
 		}
+	} else {
+		for (i = 0; i < ARRAY_SIZE(cal->ctx); ++i) {
+			cal->ctx[i] = cal_ctx_create(cal, i);
+			if (!cal->ctx[i]) {
+				cal_err(cal, "Failed to create context %u\n", i);
+				ret = -ENODEV;
+				goto error_context;
+			}
 
-		cal->num_contexts++;
+			cal->num_contexts++;
+		}
 	}
 
 	/* Register the media device. */

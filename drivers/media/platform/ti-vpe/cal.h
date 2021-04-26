@@ -45,7 +45,7 @@
 
 #define CAL_CAMERARX_PAD_SINK		0
 #define CAL_CAMERARX_PAD_FIRST_SOURCE	1
-#define CAL_CAMERARX_NUM_SOURCE_PADS	1
+#define CAL_CAMERARX_NUM_SOURCE_PADS	8
 #define CAL_CAMERARX_NUM_PADS		(1 + CAL_CAMERARX_NUM_SOURCE_PADS)
 
 static inline bool cal_rx_pad_is_sink(u32 pad)
@@ -255,6 +255,7 @@ struct cal_ctx {
 extern unsigned int cal_debug;
 extern int cal_video_nr;
 extern bool cal_mc_api;
+extern bool cal_streams_api;
 
 #define cal_dbg(level, cal, fmt, arg...)				\
 	do {								\
@@ -323,6 +324,7 @@ void cal_quickdump_regs(struct cal_dev *cal);
 
 int cal_camerarx_get_remote_frame_desc(struct cal_camerarx *phy,
 				       struct v4l2_mbus_frame_desc *fd);
+struct cal_camerarx *cal_camerarx_get_phy_from_entity(struct media_entity *entity);
 void cal_camerarx_disable(struct cal_camerarx *phy);
 void cal_camerarx_i913_errata(struct cal_camerarx *phy);
 struct cal_camerarx *cal_camerarx_create(struct cal_dev *cal,
