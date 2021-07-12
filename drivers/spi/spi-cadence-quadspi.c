@@ -221,6 +221,8 @@ struct cqspi_driver_platdata {
 #define CQSPI_REG_CMDCTRL_RD_BYTES_MASK		0x7
 #define CQSPI_REG_CMDCTRL_DUMMY_MASK		0x1F
 
+#define CQSPI_REG_CMDCTRL_ADDR_REG		0x94
+
 #define CQSPI_REG_INDIRECTWR			0x70
 #define CQSPI_REG_INDIRECTWR_START_MASK		BIT(0)
 #define CQSPI_REG_INDIRECTWR_CANCEL_MASK	BIT(1)
@@ -1090,6 +1092,8 @@ static int cqspi_command_read(struct cqspi_flash_pdata *f_pdata,
 	u8 *rxbuf = op->data.buf.in;
 	u8 opcode;
 	size_t n_rx = op->data.nbytes;
+	u32 addr = op->addr.val;
+	u8 n_addr = op->addr.nbytes;
 	unsigned int rdreg;
 	unsigned int reg;
 	unsigned int dummy_clk;
@@ -1129,6 +1133,14 @@ static int cqspi_command_read(struct cqspi_flash_pdata *f_pdata,
 	if (dummy_clk)
 		reg |= (dummy_clk & CQSPI_REG_CMDCTRL_DUMMY_MASK)
 		     << CQSPI_REG_CMDCTRL_DUMMY_LSB;
+
+	if (n_addr) {
+		reg |= ((n_addr - 1) & CQSPI_REG_CMDCTRL_ADD_BYTES_MASK) <<
+		       CQSPI_REG_CMDCTRL_ADD_BYTES_LSB;
+		reg |= (0x1 << CQSPI_REG_CMDCTRL_ADDR_EN_LSB);
+
+		writel(addr, reg_base + CQSPI_REG_CMDCTRL_ADDR_REG);
+	}
 
 	reg |= (0x1 << CQSPI_REG_CMDCTRL_RD_EN_LSB);
 
@@ -1976,7 +1988,7 @@ static int cqspi_mem_process(struct spi_mem *mem, const struct spi_mem_op *op)
 	cqspi_configure(f_pdata, mem->spi->max_speed_hz);
 
 	if (op->data.dir == SPI_MEM_DATA_IN && op->data.buf.in) {
-		if (!op->addr.nbytes)
+		if (!op->addr.nbytes || op->data.nbytes <= CQSPI_STIG_DATA_LEN_MAX)
 			return cqspi_command_read(f_pdata, op);
 
 		return cqspi_read(f_pdata, op);
