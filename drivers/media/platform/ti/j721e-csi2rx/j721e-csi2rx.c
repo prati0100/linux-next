@@ -36,6 +36,7 @@
 #define SHIM_PSI_CFG0_SRC_TAG		GENMASK(15, 0)
 #define SHIM_PSI_CFG0_DST_TAG		GENMASK(31, 15)
 
+#define CSI_DF_META			0x12
 #define CSI_DF_YUV420			0x18
 #define CSI_DF_YUV422			0x1e
 #define CSI_DF_RGB444			0x20
@@ -153,6 +154,12 @@ static const struct ti_csi2rx_fmt formats[] = {
 		.code			= MEDIA_BUS_FMT_VYUY8_2X8,
 		.colorspace		= V4L2_COLORSPACE_SRGB,
 		.csi_df			= CSI_DF_YUV422,
+		.bpp			= 16,
+	}, {
+		.fourcc			= V4L2_META_FMT_16,
+		.code			= MEDIA_BUS_FMT_METADATA_16,
+		.colorspace		= V4L2_COLORSPACE_DEFAULT,
+		.csi_df			= CSI_DF_META,
 		.bpp			= 16,
 	},
 
