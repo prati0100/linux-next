@@ -1554,4 +1554,17 @@ int v4l2_subdev_get_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
  */
 int v4l2_routing_simple_verify(const struct v4l2_subdev_krouting *routing);
 
+struct v4l2_subdev_route *
+__v4l2_subdev_next_active_route(const struct v4l2_subdev_krouting *routing,
+                struct v4l2_subdev_route *route);
+
+/**
+ * for_each_active_route - iterate on all active routes of a routing table
+ * @routing: The routing table
+ * @route: The route iterator
+ */
+#define for_each_active_route(routing, route) \
+    for ((route) = NULL;                  \
+         ((route) = __v4l2_subdev_next_active_route((routing), (route)));)
+
 #endif
