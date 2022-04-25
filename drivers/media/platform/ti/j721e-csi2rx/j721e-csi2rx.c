@@ -47,8 +47,8 @@
  * Use 16M * 16M as the arbitrary limit. It is large enough that it is unlikely
  * the limit will be hit in practice.
  */
-#define MAX_WIDTH_BYTES			SZ_16M
-#define MAX_HEIGHT_BYTES		SZ_16M
+#define MAX_WIDTH_BYTES			SZ_16K
+#define MAX_HEIGHT_LINES		SZ_16K
 
 struct ti_csi2rx_fmt {
 	u32				fourcc;	/* Four character code. */
@@ -128,6 +128,31 @@ static const struct ti_csi2rx_fmt formats[] = {
 		.csi_df			= CSI_DF_YUV422,
 		.bpp			= 16,
 	},
+	{
+		.fourcc			= V4L2_PIX_FMT_YUYV,
+		.code			= MEDIA_BUS_FMT_YUYV8_1X16,
+		.colorspace		= V4L2_COLORSPACE_SRGB,
+		.csi_df			= CSI_DF_YUV422,
+		.bpp			= 16,
+	}, {
+		.fourcc			= V4L2_PIX_FMT_UYVY,
+		.code			= MEDIA_BUS_FMT_UYVY8_1X16,
+		.colorspace		= V4L2_COLORSPACE_SRGB,
+		.csi_df			= CSI_DF_YUV422,
+		.bpp			= 16,
+	}, {
+		.fourcc			= V4L2_PIX_FMT_YVYU,
+		.code			= MEDIA_BUS_FMT_YVYU8_1X16,
+		.colorspace		= V4L2_COLORSPACE_SRGB,
+		.csi_df			= CSI_DF_YUV422,
+		.bpp			= 16,
+	}, {
+		.fourcc			= V4L2_PIX_FMT_VYUY,
+		.code			= MEDIA_BUS_FMT_VYUY8_1X16,
+		.colorspace		= V4L2_COLORSPACE_SRGB,
+		.csi_df			= CSI_DF_YUV422,
+		.bpp			= 16,
+	},
 
 	/* More formats can be supported but they are not listed for now. */
 };
@@ -150,18 +175,43 @@ static const struct ti_csi2rx_fmt *find_format_by_pix(u32 pixelformat)
 	return NULL;
 }
 
+static const struct ti_csi2rx_fmt *find_format_by_code(u32 code)
+{
+	unsigned int i;
+
+	for (i = 0; i < num_formats; i++) {
+		if (formats[i].code == code)
+			return &formats[i];
+	}
+
+	return NULL;
+}
+
 static void ti_csi2rx_fill_fmt(const struct ti_csi2rx_fmt *csi_fmt,
 			       struct v4l2_format *v4l2_fmt)
 {
 	struct v4l2_pix_format *pix = &v4l2_fmt->fmt.pix;
+	unsigned int pixels_in_word;
+	u8 bpp = csi_fmt->bpp;
 	u32 bpl;
+
+	/* TODO: Figure this out. */
+
+	pixels_in_word = PSIL_WORD_SIZE_BYTES * 8 / bpp;
+
+	pix->width = clamp_t(unsigned int, pix->width,
+			     pixels_in_word,
+			     MAX_WIDTH_BYTES * 8 / bpp);
+	pix->width = rounddown(pix->width, pixels_in_word);
+
+	pix->height = clamp_t(unsigned int, pix->height, 1, MAX_HEIGHT_LINES);
 
 	v4l2_fmt->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	pix->pixelformat = csi_fmt->fourcc;
 	pix->colorspace = csi_fmt->colorspace;
-	pix->sizeimage = pix->height * pix->width * (csi_fmt->bpp / 8);
+	pix->sizeimage = pix->height * pix->width * (bpp / 8);
 
-	bpl = (pix->width * ALIGN(csi_fmt->bpp, 8)) >> 3;
+	bpl = (pix->width * ALIGN(bpp, 8)) >> 3;
 	pix->bytesperline = ALIGN(bpl, 16);
 }
 
@@ -266,10 +316,11 @@ static int ti_csi2rx_enum_framesizes(struct file *file, void *fh,
 
 	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 	fsize->stepwise.min_width = pixels_in_word;
-	fsize->stepwise.max_width = rounddown(MAX_WIDTH_BYTES, pixels_in_word);
+	fsize->stepwise.max_width = rounddown(MAX_WIDTH_BYTES * 8 / bpp,
+					      pixels_in_word);
 	fsize->stepwise.step_width = pixels_in_word;
 	fsize->stepwise.min_height = 1;
-	fsize->stepwise.max_height = MAX_HEIGHT_BYTES;
+	fsize->stepwise.max_height = MAX_HEIGHT_LINES;
 	fsize->stepwise.step_height = 1;
 
 	return 0;
@@ -713,9 +764,108 @@ static int ti_csi2rx_init_vb2q(struct ti_csi2rx_dev *csi)
 	return 0;
 }
 
+static int ti_csi2rx_link_validate_get_fmt(struct media_pad *pad,
+					   struct v4l2_subdev_format *fmt)
+{
+	if (is_media_entity_v4l2_subdev(pad->entity)) {
+		struct v4l2_subdev *sd =
+			media_entity_to_v4l2_subdev(pad->entity);
+
+		fmt->which = V4L2_SUBDEV_FORMAT_ACTIVE;
+		fmt->pad = pad->index;
+		return v4l2_subdev_call(sd, pad, get_fmt, NULL, fmt);
+	}
+
+	WARN(pad->entity->function != MEDIA_ENT_F_IO_V4L,
+	     "Driver bug! Wrong media entity type 0x%08x, entity %s\n",
+	     pad->entity->function, pad->entity->name);
+
+	return -EINVAL;
+}
+
+static int ti_csi2rx_link_validate(struct media_link *link)
+{
+	struct media_entity *entity = link->sink->entity;
+	struct video_device *vdev = media_entity_to_video_device(entity);
+	struct ti_csi2rx_dev *csi = container_of(vdev, struct ti_csi2rx_dev, vdev);
+	struct v4l2_pix_format *csi_fmt = &csi->v_fmt.fmt.pix;
+	struct v4l2_subdev_format source_fmt;
+	const struct ti_csi2rx_fmt *ti_fmt;
+	int ret;
+
+	if (!(link->flags & MEDIA_LNK_FL_ENABLED)) {
+		dev_info(csi->dev, "video node %s pad not connected\n",
+			 vdev->name);
+		return -ENOTCONN;
+	}
+
+	ret = ti_csi2rx_link_validate_get_fmt(link->source, &source_fmt);
+	if (ret)
+		return ret;
+
+	if (source_fmt.format.width != csi_fmt->width) {
+		dev_err(csi->dev, "Width does not match (source %u, sink %u)\n",
+			source_fmt.format.width, csi_fmt->width);
+		return -EPIPE;
+	}
+
+	if (source_fmt.format.height != csi_fmt->height) {
+		dev_err(csi->dev, "Height does not match (source %u, sink %u)\n",
+			source_fmt.format.height, csi_fmt->height);
+		return -EPIPE;
+	}
+
+	if (source_fmt.format.field != csi_fmt->field &&
+	    csi_fmt->field != V4L2_FIELD_NONE) {
+		dev_err(csi->dev, "Field does not match (source %u, sink %u)\n",
+			source_fmt.format.field, csi_fmt->field);
+		return -EPIPE;
+	}
+
+	ti_fmt = find_format_by_code(source_fmt.format.code);
+	if (!ti_fmt) {
+		dev_err(csi->dev, "Media bus format 0x%x not supported\n",
+			source_fmt.format.code);
+		return -EPIPE;
+	}
+
+	if (source_fmt.format.code == MEDIA_BUS_FMT_YUYV8_2X8 ||
+	    source_fmt.format.code == MEDIA_BUS_FMT_VYUY8_2X8 ||
+	    source_fmt.format.code == MEDIA_BUS_FMT_YVYU8_2X8) {
+		dev_err(csi->dev,
+			"Only UYVY input allowed for YUV422 8-bit. Output format can be configured.\n");
+		return -EPIPE;
+	}
+
+	if (source_fmt.format.code == MEDIA_BUS_FMT_UYVY8_2X8) {
+		/* Format conversion between YUV422 formats can be done. */
+		if (ti_fmt->code != MEDIA_BUS_FMT_UYVY8_2X8 &&
+		    ti_fmt->code != MEDIA_BUS_FMT_YUYV8_2X8 &&
+		    ti_fmt->code != MEDIA_BUS_FMT_VYUY8_2X8 &&
+		    ti_fmt->code != MEDIA_BUS_FMT_YVYU8_2X8) {
+			dev_err(csi->dev,
+				"Source format (0x%x) is YUV422 but sink format (0x%x) is not\n",
+				source_fmt.format.code, ti_fmt->code);
+			return -EPIPE;
+		}
+	} else if (source_fmt.format.code != ti_fmt->code) {
+		dev_err(csi->dev,
+			"Cannot transform source fmt 0x%x to sink fmt 0x%x\n",
+			source_fmt.format.code, ti_fmt->code);
+		return -EPIPE;
+	}
+
+	return 0;
+}
+
+static const struct media_entity_operations ti_csi2rx_video_entity_ops = {
+	.link_validate = ti_csi2rx_link_validate,
+};
+
 static int ti_csi2rx_init_dma(struct ti_csi2rx_dev *csi)
 {
-	struct dma_slave_config cfg;
+	struct dma_slave_config cfg =
+		{ .src_addr_width = DMA_SLAVE_BUSWIDTH_16_BYTES };
 	int ret;
 
 	INIT_LIST_HEAD(&csi->dma.queue);
@@ -727,13 +877,11 @@ static int ti_csi2rx_init_dma(struct ti_csi2rx_dev *csi)
 	if (IS_ERR(csi->dma.chan))
 		return PTR_ERR(csi->dma.chan);
 
-	memset(&cfg, 0, sizeof(cfg));
-
-	cfg.src_addr_width = DMA_SLAVE_BUSWIDTH_16_BYTES;
-
 	ret = dmaengine_slave_config(csi->dma.chan, &cfg);
-	if (ret)
+	if (ret) {
+		dma_release_channel(csi->dma.chan);
 		return ret;
+	}
 
 	return 0;
 }
@@ -775,6 +923,7 @@ static int ti_csi2rx_v4l2_init(struct ti_csi2rx_dev *csi)
 	video_set_drvdata(vdev, csi);
 
 	csi->pad.flags = MEDIA_PAD_FL_SINK;
+	vdev->entity.ops = &ti_csi2rx_video_entity_ops;
 	ret = media_entity_pads_init(&csi->vdev.entity, 1, &csi->pad);
 	if (ret)
 		return ret;
@@ -835,12 +984,14 @@ static int ti_csi2rx_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	csi->shim = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(csi->shim))
-		return PTR_ERR(csi->shim);
+	if (IS_ERR(csi->shim)) {
+		ret = PTR_ERR(csi->shim);
+		goto err_mutex;
+	}
 
 	ret = ti_csi2rx_init_dma(csi);
 	if (ret)
-		return ret;
+		goto err_mutex;
 
 	ret = ti_csi2rx_v4l2_init(csi);
 	if (ret)
@@ -870,6 +1021,8 @@ err_v4l2:
 	ti_csi2rx_cleanup_v4l2(csi);
 err_dma:
 	ti_csi2rx_cleanup_dma(csi);
+err_mutex:
+	mutex_destroy(&csi->mutex);
 	return ret;
 }
 
@@ -877,15 +1030,14 @@ static int ti_csi2rx_remove(struct platform_device *pdev)
 {
 	struct ti_csi2rx_dev *csi = platform_get_drvdata(pdev);
 
-	if (vb2_is_busy(&csi->vidq))
-		return -EBUSY;
-
 	video_unregister_device(&csi->vdev);
 
 	ti_csi2rx_cleanup_vb2q(csi);
 	ti_csi2rx_cleanup_subdev(csi);
 	ti_csi2rx_cleanup_v4l2(csi);
 	ti_csi2rx_cleanup_dma(csi);
+
+	mutex_destroy(&csi->mutex);
 
 	return 0;
 }
