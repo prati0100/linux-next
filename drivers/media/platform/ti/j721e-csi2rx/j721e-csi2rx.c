@@ -8,11 +8,12 @@
  */
 
 #include <linux/bitfield.h>
-#include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/dmaengine.h>
+#include <linux/module.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
 
+#include <media/mipi-csi2.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-dma-contig.h>
@@ -35,11 +36,6 @@
 #define SHIM_PSI_CFG0_SRC_TAG		GENMASK(15, 0)
 #define SHIM_PSI_CFG0_DST_TAG		GENMASK(31, 15)
 
-#define CSI_DF_YUV420			0x18
-#define CSI_DF_YUV422			0x1e
-#define CSI_DF_RGB444			0x20
-#define CSI_DF_RGB888			0x24
-
 #define PSIL_WORD_SIZE_BYTES		16
 /*
  * There are no hard limits on the width or height. The DMA engine can handle
@@ -53,8 +49,7 @@
 struct ti_csi2rx_fmt {
 	u32				fourcc;	/* Four character code. */
 	u32				code;	/* Mbus code. */
-	enum v4l2_colorspace		colorspace;
-	u32				csi_df;	/* CSI Data format. */
+	u32				csi_dt;	/* CSI Data type. */
 	u8				bpp;	/* Bits per pixel. */
 };
 
@@ -106,51 +101,43 @@ static const struct ti_csi2rx_fmt formats[] = {
 	{
 		.fourcc			= V4L2_PIX_FMT_YUYV,
 		.code			= MEDIA_BUS_FMT_YUYV8_2X8,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	}, {
 		.fourcc			= V4L2_PIX_FMT_UYVY,
 		.code			= MEDIA_BUS_FMT_UYVY8_2X8,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	}, {
 		.fourcc			= V4L2_PIX_FMT_YVYU,
 		.code			= MEDIA_BUS_FMT_YVYU8_2X8,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	}, {
 		.fourcc			= V4L2_PIX_FMT_VYUY,
 		.code			= MEDIA_BUS_FMT_VYUY8_2X8,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	},
 	{
 		.fourcc			= V4L2_PIX_FMT_YUYV,
 		.code			= MEDIA_BUS_FMT_YUYV8_1X16,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	}, {
 		.fourcc			= V4L2_PIX_FMT_UYVY,
 		.code			= MEDIA_BUS_FMT_UYVY8_1X16,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	}, {
 		.fourcc			= V4L2_PIX_FMT_YVYU,
 		.code			= MEDIA_BUS_FMT_YVYU8_1X16,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	}, {
 		.fourcc			= V4L2_PIX_FMT_VYUY,
 		.code			= MEDIA_BUS_FMT_VYUY8_1X16,
-		.colorspace		= V4L2_COLORSPACE_SRGB,
-		.csi_df			= CSI_DF_YUV422,
+		.csi_dt			= MIPI_CSI2_DT_YUV422_8B,
 		.bpp			= 16,
 	},
 
@@ -208,7 +195,7 @@ static void ti_csi2rx_fill_fmt(const struct ti_csi2rx_fmt *csi_fmt,
 
 	v4l2_fmt->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	pix->pixelformat = csi_fmt->fourcc;
-	pix->colorspace = csi_fmt->colorspace;
+	pix->colorspace = V4L2_COLORSPACE_SRGB;
 	pix->sizeimage = pix->height * pix->width * (bpp / 8);
 
 	bpl = (pix->width * ALIGN(bpp, 8)) >> 3;
@@ -269,7 +256,8 @@ static int ti_csi2rx_try_fmt_vid_cap(struct file *file, void *priv,
 		f->fmt.pix.field = V4L2_FIELD_NONE;
 
 	if (f->fmt.pix.field != V4L2_FIELD_NONE)
-		return -EINVAL;
+		/* Interlaced formats are not supported. */
+		f->fmt.pix.field = V4L2_FIELD_NONE;
 
 	ti_csi2rx_fill_fmt(fmt, f);
 
@@ -354,7 +342,7 @@ static const struct v4l2_file_operations csi_fops = {
 	.mmap = vb2_fop_mmap,
 };
 
-static int ti_csi2rx_video_register(struct ti_csi2rx_dev *csi)
+static inline int ti_csi2rx_video_register(struct ti_csi2rx_dev *csi)
 {
 	struct video_device *vdev = &csi->vdev;
 	int ret, src_pad;
@@ -464,7 +452,7 @@ static void ti_csi2rx_setup_shim(struct ti_csi2rx_dev *csi)
 	writel(reg, csi->shim + SHIM_CNTL);
 
 	reg = SHIM_DMACNTX_EN;
-	reg |= FIELD_PREP(SHIM_DMACNTX_FMT, fmt->csi_df);
+	reg |= FIELD_PREP(SHIM_DMACNTX_FMT, fmt->csi_dt);
 
 	/*
 	 * Using the values from the documentation gives incorrect ordering for
@@ -506,7 +494,7 @@ static void ti_csi2rx_dma_callback(void *param)
 	struct ti_csi2rx_buffer *buf = param;
 	struct ti_csi2rx_dev *csi = buf->csi;
 	struct ti_csi2rx_dma *dma = &csi->dma;
-	unsigned long flags = 0;
+	unsigned long flags;
 
 	buf->vb.vb2_buf.timestamp = ktime_get_ns();
 	buf->vb.sequence = csi->sequence++;
@@ -1062,4 +1050,3 @@ module_platform_driver(ti_csi2rx_pdrv);
 MODULE_DESCRIPTION("TI J721E CSI2 RX Driver");
 MODULE_AUTHOR("Pratyush Yadav <p.yadav@ti.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_VERSION("1.0");
