@@ -554,6 +554,27 @@ static int ti_csi2rx_start_dma(struct ti_csi2rx_dev *csi,
 	return 0;
 }
 
+static void ti_csi2rx_cleanup_buffers(struct ti_csi2rx_dev *csi,
+				      enum vb2_buffer_state state)
+{
+	struct ti_csi2rx_dma *dma = &csi->dma;
+	struct ti_csi2rx_buffer *buf = NULL, *tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dma->lock, flags);
+	list_for_each_entry_safe(buf, tmp, &csi->dma.queue, list) {
+		list_del(&buf->list);
+		vb2_buffer_done(&buf->vb.vb2_buf, state);
+	}
+
+	if (dma->curr)
+		vb2_buffer_done(&dma->curr->vb.vb2_buf, state);
+
+	dma->curr = NULL;
+	dma->state = TI_CSI2RX_DMA_STOPPED;
+	spin_unlock_irqrestore(&dma->lock, flags);
+}
+
 static int ti_csi2rx_queue_setup(struct vb2_queue *q, unsigned int *nbuffers,
 				 unsigned int *nplanes, unsigned int sizes[],
 				 struct device *alloc_devs[])
@@ -625,7 +646,7 @@ static int ti_csi2rx_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct ti_csi2rx_dev *csi = vb2_get_drv_priv(vq);
 	struct ti_csi2rx_dma *dma = &csi->dma;
-	struct ti_csi2rx_buffer *buf, *tmp;
+	struct ti_csi2rx_buffer *buf;
 	unsigned long flags;
 	int ret = 0;
 
@@ -642,52 +663,42 @@ static int ti_csi2rx_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 	ti_csi2rx_setup_shim(csi);
 
-	ret = v4l2_subdev_call(csi->subdev, video, s_stream, 1);
-	if (ret)
-		goto err_pipeline;
-
 	csi->sequence = 0;
 
 	spin_lock_irqsave(&dma->lock, flags);
 	buf = list_entry(dma->queue.next, struct ti_csi2rx_buffer, list);
 	list_del(&buf->list);
 	dma->state = TI_CSI2RX_DMA_ACTIVE;
+	dma->curr = buf;
 
 	ret = ti_csi2rx_start_dma(csi, buf);
 	if (ret) {
 		dev_err(csi->dev, "Failed to start DMA: %d\n", ret);
-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_QUEUED);
 		spin_unlock_irqrestore(&dma->lock, flags);
-		goto err_stream;
+		goto err_pipeline;
 	}
 
-	dma->curr = buf;
 	spin_unlock_irqrestore(&dma->lock, flags);
+
+	ret = v4l2_subdev_call(csi->subdev, video, s_stream, 1);
+	if (ret)
+		goto err_dma;
 
 	return 0;
 
-err_stream:
-	v4l2_subdev_call(csi->subdev, video, s_stream, 0);
+err_dma:
+	dmaengine_terminate_sync(csi->dma.chan);
+	writel(0, csi->shim + SHIM_DMACNTX);
 err_pipeline:
 	media_pipeline_stop(&csi->vdev.entity);
 err:
-	spin_lock_irqsave(&dma->lock, flags);
-	list_for_each_entry_safe(buf, tmp, &dma->queue, list) {
-		list_del(&buf->list);
-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_QUEUED);
-	}
-	csi->dma.state = TI_CSI2RX_DMA_STOPPED;
-	spin_unlock_irqrestore(&dma->lock, flags);
-
+	ti_csi2rx_cleanup_buffers(csi, VB2_BUF_STATE_QUEUED);
 	return ret;
 }
 
 static void ti_csi2rx_stop_streaming(struct vb2_queue *vq)
 {
 	struct ti_csi2rx_dev *csi = vb2_get_drv_priv(vq);
-	struct ti_csi2rx_buffer *buf = NULL, *tmp;
-	struct ti_csi2rx_dma *dma = &csi->dma;
-	unsigned long flags = 0;
 	int ret;
 
 	media_pipeline_stop(&csi->vdev.entity);
@@ -700,22 +711,11 @@ static void ti_csi2rx_stop_streaming(struct vb2_queue *vq)
 
 	ret = dmaengine_terminate_sync(csi->dma.chan);
 	if (ret)
-		dev_err(csi->dev, "Failed to stop DMA\n");
+		dev_err(csi->dev, "Failed to stop DMA: %d\n", ret);
 
 	writel(0, csi->shim + SHIM_DMACNTX);
 
-	spin_lock_irqsave(&dma->lock, flags);
-	list_for_each_entry_safe(buf, tmp, &csi->dma.queue, list) {
-		list_del(&buf->list);
-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-	}
-
-	if (dma->curr)
-		vb2_buffer_done(&dma->curr->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-
-	dma->curr = NULL;
-	dma->state = TI_CSI2RX_DMA_STOPPED;
-	spin_unlock_irqrestore(&dma->lock, flags);
+	ti_csi2rx_cleanup_buffers(csi, VB2_BUF_STATE_ERROR);
 }
 
 static const struct vb2_ops csi_vb2_qops = {
@@ -734,7 +734,7 @@ static int ti_csi2rx_init_vb2q(struct ti_csi2rx_dev *csi)
 	int ret;
 
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	q->io_modes = VB2_MMAP | VB2_USERPTR | VB2_DMABUF | VB2_READ;
+	q->io_modes = VB2_MMAP | VB2_DMABUF | VB2_READ;
 	q->drv_priv = csi;
 	q->buf_struct_size = sizeof(struct ti_csi2rx_buffer);
 	q->ops = &csi_vb2_qops;
@@ -888,6 +888,7 @@ static int ti_csi2rx_v4l2_init(struct ti_csi2rx_dev *csi)
 
 	pix_fmt->width = 640;
 	pix_fmt->height = 480;
+	pix_fmt->field = V4L2_FIELD_NONE;
 
 	ti_csi2rx_fill_fmt(fmt, &csi->v_fmt);
 
@@ -905,8 +906,8 @@ static int ti_csi2rx_v4l2_init(struct ti_csi2rx_dev *csi)
 	vdev->fops = &csi_fops;
 	vdev->ioctl_ops = &csi_ioctl_ops;
 	vdev->release = video_device_release_empty;
-	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
-			    V4L2_CAP_STREAMING | V4L2_CAP_IO_MC;
+	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING |
+			    V4L2_CAP_IO_MC;
 	vdev->lock = &csi->mutex;
 	video_set_drvdata(vdev, csi);
 
